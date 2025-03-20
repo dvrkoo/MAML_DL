@@ -7,6 +7,7 @@ import higher
 from torchvision import transforms
 import random
 from tqdm import tqdm
+from PIL import Image
 
 # set random seed for reproducibility
 random.seed(222)
@@ -148,11 +149,13 @@ def maml_train(meta, meta_optimizer, data_loader, device="cuda"):
             y_qry = query_labels[i].to(device)
 
             qry_loss, acc = meta(x_spt, y_spt, x_qry, y_qry)
-            qry_loss.backward(retain_graph=True)  # Accumulate gradients
+            scaled_loss = qry_loss / meta_batch_size
+            scaled_loss.backward(retain_graph=True)  # Backward on the scaled loss
             task_accs.append(acc)  # Save individual task accuracy
             losses.append(qry_loss.item())
 
         meta_optimizer.step()  # Update after all tasks
+        torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=0.5)
 
         # Print individual task accuracies for this meta-batch
         avg_acc = sum(task_accs) / len(task_accs)
@@ -231,9 +234,12 @@ def main():
     # Transforms for mini‑ImageNet.
     imagenet_transform = transforms.Compose(
         [
-            transforms.RandomResizedCrop(84),
-            transforms.RandomHorizontalFlip(),
+            # lambda x: Image.open(x).convert("RGB"),
+            transforms.Resize((84, 84)),
+            # transforms.RandomHorizontalFlip(),
+            # transforms.RandomRotation(5),
             transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]
     )
 
@@ -271,7 +277,7 @@ def main():
     # Initialize the model and meta learner.
     model = MAMLConvNet(n_way=args.n_way).to(device)
     meta = Meta(args, model).to(device)
-    meta_optimizer = optim.SGD(meta.parameters(), lr=args.meta_lr)
+    meta_optimizer = optim.Adam(meta.parameters(), lr=args.meta_lr)
 
     global_step = 0
     # Inside the main() training loop:
