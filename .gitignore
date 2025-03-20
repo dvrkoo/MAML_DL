@@ -1,3 +1,4 @@
-datasets/
+datasets/MiniImageNet/
+datasets/omniglot/
 __pycache__/
 .venv

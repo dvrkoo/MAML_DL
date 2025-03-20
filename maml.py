@@ -38,9 +38,12 @@ class MAMLConvNet(nn.Module):
         self.layer4 = conv_block(hidden_size, hidden_size)
         # Assuming input images are 84x84; after 4 poolings (factor 16 reduction) we get 84/16 ≈ 5.
         self.classifier = nn.Linear(hidden_size * 5 * 5, n_way)
-        for layer in self.modules():
-            if isinstance(layer, nn.Conv2d):
-                nn.init.kaiming_normal_(layer.weight)
+        # Change to Xavier/Glorot initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.xavier_uniform_(m.weight)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
 
     def forward(self, x):
         out = self.layer1(x)
@@ -59,68 +62,37 @@ class MAMLConvNet(nn.Module):
 
 class Meta(nn.Module):
     def __init__(self, args, model):
-        """
-        Meta wrapper that implements the inner-loop adaptation and meta-update.
-        Args:
-            args: Namespace or dict containing hyperparameters.
-            model: The base learner (MAMLConvNet).
-        """
         super(Meta, self).__init__()
         self.args = args
         self.net = model
+        # Match optimizer with reference implementation
+        self.inner_optimizer = torch.optim.SGD(
+            self.net.parameters(), lr=self.args.inner_lr
+        )
 
     def forward(self, x_spt, y_spt, x_qry, y_qry):
         """
         Performs the inner-loop adaptation and computes query loss.
         """
-        # Create inner-loop optimizer for adaptation (SGD)
-        inner_optimizer = torch.optim.SGD(self.net.parameters(), lr=self.args.inner_lr)
-        # Use higher to create a functional copy of the network.
         with higher.innerloop_ctx(
-            self.net, inner_optimizer, copy_initial_weights=True
+            self.net, self.inner_optimizer, copy_initial_weights=True
         ) as (fnet, diffopt):
+            # Inner loop adaptation
             for _ in range(self.args.update_step):
                 logits = fnet(x_spt)
                 loss = F.cross_entropy(logits, y_spt)
                 diffopt.step(loss)
-            # After adaptation, evaluate on the query set.
+
+            # Evaluate on query set
             logits_q = fnet(x_qry)
             qry_loss = F.cross_entropy(logits_q, y_qry)
-            # Optionally, compute accuracy
+
+            # Calculate accuracy
             pred = torch.argmax(logits_q, dim=1)
             correct = torch.eq(pred, y_qry).sum().item()
             acc = correct / float(len(y_qry))
-        return qry_loss, acc
 
-    def finetunning(self, x_spt, y_spt, x_qry, y_qry):
-        """
-        Finetuning procedure for evaluation. This function returns the accuracy after each update step.
-        It ensures that gradients are enabled for the inner-loop adaptation, even if called within a no_grad context.
-        """
-        inner_optimizer = torch.optim.SGD(self.net.parameters(), lr=self.args.inner_lr)
-        accs = []
-        # Ensure gradients are enabled for inner-loop updates.
-        with torch.set_grad_enabled(True):
-            with higher.innerloop_ctx(
-                self.net, inner_optimizer, track_higher_grads=False
-            ) as (fnet, diffopt):
-                # Evaluate before any updates.
-                logits_q = fnet(x_qry)
-                pred = torch.argmax(logits_q, dim=1)
-                correct = torch.eq(pred, y_qry).sum().item()
-                acc = correct / float(len(y_qry))
-                accs.append(acc)
-                # Finetuning updates.
-                for _ in range(self.args.update_step_test):
-                    logits = fnet(x_spt)
-                    loss = F.cross_entropy(logits, y_spt)
-                    diffopt.step(loss)
-                    logits_q = fnet(x_qry)
-                    pred = torch.argmax(logits_q, dim=1)
-                    correct = torch.eq(pred, y_qry).sum().item()
-                    acc = correct / float(len(y_qry))
-                    accs.append(acc)
-        return accs
+        return qry_loss, acc
 
 
 #################################
@@ -139,8 +111,8 @@ def maml_train(meta, meta_optimizer, data_loader, device="cuda"):
         query_labels,
     ) in enumerate(tqdm(data_loader)):
         meta_optimizer.zero_grad()
-        task_accs = []  # Store accuracies for all tasks in this meta-batch
-        losses = []
+        task_accs = []
+        total_loss = 0  # Accumulator for loss
 
         for i in range(meta_batch_size):
             x_spt = support_images[i].to(device)
@@ -149,24 +121,26 @@ def maml_train(meta, meta_optimizer, data_loader, device="cuda"):
             y_qry = query_labels[i].to(device)
 
             qry_loss, acc = meta(x_spt, y_spt, x_qry, y_qry)
-            scaled_loss = qry_loss / meta_batch_size
-            scaled_loss.backward(retain_graph=True)  # Backward on the scaled loss
-            task_accs.append(acc)  # Save individual task accuracy
-            losses.append(qry_loss.item())
+            total_loss += qry_loss / meta_batch_size  # Accumulate normalized loss
+            task_accs.append(acc)
 
-        meta_optimizer.step()  # Update after all tasks
+        # Single backward pass on accumulated loss
+        total_loss.backward()
+
+        # Clip gradients after backward pass but before optimizer step
         torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=0.5)
+        meta_optimizer.step()
 
         # Print individual task accuracies for this meta-batch
         avg_acc = sum(task_accs) / len(task_accs)
         if batch_idx % 30 == 0:
             tqdm.write(f"\nMeta-Batch {batch_idx + 1}/{len(data_loader)}:")
             for i, acc in enumerate(task_accs):
-                tqdm.write(f"  Task {i + 1}: Acc = {acc:.2%}, Loss = {losses[i]:.4f}")
+                tqdm.write(f"  Task {i + 1}: Acc = {acc:.2%}")
             tqdm.write(f"  Avg Acc: {avg_acc:.2%}")
 
         # Track for epoch averages
-        total_meta_loss += qry_loss.item() / meta_batch_size
+        total_meta_loss += total_loss.item()
         total_meta_acc += avg_acc
 
     avg_meta_loss = total_meta_loss / len(data_loader)
@@ -221,12 +195,13 @@ def main():
         k_shot = 1
         k_query = 15
         update_step = 5  # Inner loop steps for training.
-        update_step_test = 5  # More inner loop steps for testing.
-        inner_lr = 0.01
-        meta_lr = 0.001
-        episodes = 10000  # Total episodes for training.
-        batch_size = 4  # Meta batch size (number of episodes per meta-update).
-        epoch = 5  # Total training iterations (adjust as needed).
+        update_step_test = 10  # More inner loop steps for testing (as in reference)
+        inner_lr = 0.01  # Learning rate for adaptation
+        meta_lr = 0.001  # Meta learning rate
+        meta_batch_size = 4  # Meta batch size (number of tasks per batch)
+        episodes = 10000  # Total episodes for training (as in reference)
+        # Adjust epochs based on episodes/meta_batch_size
+        epoch = episodes // meta_batch_size // 1000  # Evaluate every 1000 batches
 
     args = Args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -268,10 +243,10 @@ def main():
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4
+        train_dataset, batch_size=args.meta_batch_size, shuffle=True, num_workers=4
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4
+        test_dataset, batch_size=args.meta_batch_size, shuffle=True, num_workers=4
     )
 
     # Initialize the model and meta learner.
