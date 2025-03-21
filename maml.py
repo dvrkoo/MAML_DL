@@ -8,7 +8,7 @@ from torchvision import transforms
 import random
 from tqdm import tqdm
 import numpy as np
-from datasets.dataloader import MiniImageNetMetaDataset
+from datasets.dataloader import MiniImageNetMetaDataset, OmniglotMetaDataset
 
 # Set random seed for reproducibility
 random.seed(222)
@@ -42,7 +42,10 @@ class MAMLConvNet(nn.Module):
         self.layer3 = conv_block(hidden_size, hidden_size)
         self.layer4 = conv_block(hidden_size, hidden_size)
         # For 84x84 input, after 4 poolings we get ~5x5 feature maps.
-        self.classifier = nn.Linear(hidden_size * 5 * 5, n_way)
+        if in_channels == 3:
+            self.classifier = nn.Linear(hidden_size * 5 * 5, n_way)
+        else:
+            self.classifier = nn.Linear(hidden_size * 1 * 1, n_way)
 
         # Xavier/Glorot initialization
         for m in self.modules():
@@ -206,7 +209,10 @@ class Meta(nn.Module):
 
             # Create gradients
             grads = torch.autograd.grad(
-                loss, fast_weights, create_graph=True, allow_unused=True
+                loss,
+                fast_weights,
+                create_graph=False if self.args.first_order else True,
+                allow_unused=True,
             )
 
             # Check gradients
@@ -223,9 +229,15 @@ class Meta(nn.Module):
             # print(f"Inner-loop grad norms: {grad_norms}")
 
             # Update fast weights.
-            fast_weights = [
-                w - self.args.inner_lr * g for w, g in zip(fast_weights, grads)
-            ]
+            if self.args.first_order:
+                fast_weights = [
+                    w - self.args.inner_lr * g.detach()
+                    for w, g in zip(fast_weights, grads)
+                ]
+            else:
+                fast_weights = [
+                    w - self.args.inner_lr * g for w, g in zip(fast_weights, grads)
+                ]
 
         # Evaluate on query set using adapted weights.
         logits_q = self.net.forward(x_qry, params=fast_weights)
@@ -392,7 +404,7 @@ def maml_train(
                 best_acc = final_acc
                 torch.save(
                     meta.state_dict(),
-                    f"maml_mini_imagenet_step{global_step}_acc{final_acc:.4f}.pt",
+                    f"./mp/maml_mini_imagenet_step{global_step}_acc{final_acc:.4f}.pt",
                 )
                 tqdm.write(f"New Best: {best_acc:.2%}, Model saved.")
 
@@ -423,6 +435,8 @@ def main():
         episodes = 10000  # Total episodes for dataset.
         epoch = 5  # Number of training epochs.
         test_interval = 500  # Test every 500 steps
+        first_order = False
+        omniglot = True
 
     args = Args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -435,26 +449,56 @@ def main():
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]
     )
+    # Example transform for Omniglot:
+    omniglot_transform = transforms.Compose(
+        [
+            transforms.Resize(28),  # Resize to 28x28
+            transforms.Grayscale(num_output_channels=1),  # Ensure 1 channel
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5]),  # Grayscale normalization
+        ]
+    )
+    if not args.omniglot:
+        # Create datasets.
+        train_dataset = MiniImageNetMetaDataset(
+            root="./datasets/MiniImageNet/",
+            csv_file="./datasets/MiniImageNet/train.csv",
+            num_classes=args.n_way,
+            num_support=args.k_shot,
+            num_query=args.k_query,
+            transform=imagenet_transform,
+            episodes=args.episodes,
+        )
+        test_dataset = MiniImageNetMetaDataset(
+            root="./datasets/MiniImageNet/",
+            csv_file="./datasets/MiniImageNet/test.csv",
+            num_classes=args.n_way,
+            num_support=args.k_shot,
+            num_query=args.k_query,
+            transform=imagenet_transform,
+            episodes=600,
+        )
+    else:
+        train_dataset = OmniglotMetaDataset(
+            root="./datasets/omniglot",
+            num_classes=5,  # 5-way classification
+            num_support=1,  # 1-shot learning
+            num_query=15,
+            transform=omniglot_transform,
+            background=True,  # Use images_background
+            episodes=60000,  # Match paper's 60k tasks
+        )
 
-    # Create datasets.
-    train_dataset = MiniImageNetMetaDataset(
-        root="./datasets/MiniImageNet/",
-        csv_file="./datasets/MiniImageNet/train.csv",
-        num_classes=args.n_way,
-        num_support=args.k_shot,
-        num_query=args.k_query,
-        transform=imagenet_transform,
-        episodes=args.episodes,
-    )
-    test_dataset = MiniImageNetMetaDataset(
-        root="./datasets/MiniImageNet/",
-        csv_file="./datasets/MiniImageNet/test.csv",
-        num_classes=args.n_way,
-        num_support=args.k_shot,
-        num_query=args.k_query,
-        transform=imagenet_transform,
-        episodes=600,
-    )
+        # Test set: 20 alphabets (evaluation) + rotations
+        test_dataset = OmniglotMetaDataset(
+            root="./datasets/omniglot",
+            num_classes=5,
+            num_support=1,
+            num_query=15,
+            transform=omniglot_transform,
+            background=False,  # Use images_evaluation
+            episodes=1000,  # Evaluate on 1k tasks
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -472,7 +516,10 @@ def main():
     )
 
     # Initialize model.
-    model = MAMLConvNet(n_way=args.n_way).to(device)
+    if not args.omniglot:
+        model = MAMLConvNet(n_way=args.n_way).to(device)
+    else:
+        model = MAMLConvNet(n_way=args.n_way, in_channels=1, hidden_size=64).to(device)
 
     # Create meta-learner.
     meta = Meta(args, model).to(device)
@@ -489,7 +536,7 @@ def main():
         avg_meta_loss, avg_meta_acc, epoch_best_acc = maml_train(
             meta, meta_optimizer, train_loader, test_loader, device, args.test_interval
         )
-        scheduler.step()
+        # scheduler.step()
 
         print(f"Train: Loss = {avg_meta_loss:.4f}, Accuracy = {avg_meta_acc:.2%}")
         best_acc = max(best_acc, epoch_best_acc)

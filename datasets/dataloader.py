@@ -129,7 +129,7 @@ class OmniglotMetaDataset(Dataset):
         num_support,
         num_query,
         transform=None,
-        download=True,
+        download=False,
         background=True,
         episodes=10000,
     ):
@@ -158,28 +158,32 @@ class OmniglotMetaDataset(Dataset):
 
         # Define which subset to use.
         subset = "images_background" if self.background else "images_evaluation"
+        assert subset in ["images_background", "images_evaluation"], "Invalid subset."
         self.data_path = os.path.join(self.root, "processed", subset)
+        self.classes = self._load_classes_with_rotations()
 
-        # Group images by character (i.e. class).
-        self.class_to_images = {}
+    def _load_classes_with_rotations(self):
+        classes = []
         for alphabet in os.listdir(self.data_path):
             alphabet_path = os.path.join(self.data_path, alphabet)
-            if os.path.isdir(alphabet_path):
-                for character in os.listdir(alphabet_path):
-                    character_path = os.path.join(alphabet_path, character)
-                    if os.path.isdir(character_path):
-                        class_name = f"{alphabet}_{character}"
+            if not os.path.isdir(alphabet_path):
+                continue
+            for character in os.listdir(alphabet_path):
+                character_path = os.path.join(alphabet_path, character)
+                if os.path.isdir(character_path):
+                    # Add original + rotated versions as separate classes
+                    for rot in [0, 90, 180, 270]:
+                        class_name = f"{alphabet}_{character}_rot{rot}"
                         images = [
                             os.path.join(character_path, img)
                             for img in os.listdir(character_path)
                             if img.endswith(".png")
                         ]
+                        # Ensure enough samples per class
                         if len(images) >= (self.num_support + self.num_query):
                             self.class_to_images[class_name] = images
-
-        self.classes = list(self.class_to_images.keys())
-        if not self.classes:
-            raise ValueError("No classes with enough images found in Omniglot dataset.")
+                            classes.append(class_name)
+        return classes
 
     def _download_and_extract(self):
         raw_folder = os.path.join(self.root, "raw")
@@ -209,6 +213,7 @@ class OmniglotMetaDataset(Dataset):
 
         for label, cls in enumerate(episode_classes):
             images = self.class_to_images[cls]
+            rotation = int(cls.split("_")[-1])  # Extract rotation angle
             samples = random.sample(images, self.num_support + self.num_query)
             support_samples = samples[: self.num_support]
             query_samples = samples[self.num_support :]
@@ -216,6 +221,7 @@ class OmniglotMetaDataset(Dataset):
             for img_path in support_samples:
                 # Omniglot images are grayscale.
                 image = Image.open(img_path).convert("L")
+                image = image.rotate(rotation)  # Apply rotation
                 if self.transform:
                     image = self.transform(image)
                 support_images.append(image)
