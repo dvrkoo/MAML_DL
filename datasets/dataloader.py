@@ -32,7 +32,7 @@ class MiniImageNetMetaDataset(Dataset):
             num_support (int): k-shot support examples per class.
             num_query (int): Number of query examples per class.
             transform: torchvision transforms.
-            episodes (int): Number of episodes (dummy length, as episodes are generated on the fly).
+            episodes (int): Number of episodes.
         """
         self.root = root
         self.csv_file = csv_file
@@ -42,7 +42,7 @@ class MiniImageNetMetaDataset(Dataset):
         self.transform = transform
         self.episodes = episodes
 
-        # Read CSV and group images by label.
+        # Read CSV and group images by label
         self.class_to_images = {}
         with open(self.csv_file, "r") as f:
             reader = csv.DictReader(f)
@@ -55,7 +55,7 @@ class MiniImageNetMetaDataset(Dataset):
                 else:
                     self.class_to_images[label] = [path]
 
-        # Only keep classes with enough images.
+        # Only keep classes with enough images
         self.classes = [
             cls
             for cls, imgs in self.class_to_images.items()
@@ -65,42 +65,48 @@ class MiniImageNetMetaDataset(Dataset):
             raise ValueError("No classes with enough images found in the CSV split.")
 
     def __len__(self):
-        # Episodes are generated on the fly.
         return self.episodes
 
     def __getitem__(self, idx):
-        # Randomly sample 'num_classes' classes.
+        # Randomly sample 'num_classes' classes
         episode_classes = random.sample(self.classes, self.num_classes)
-        support_images, support_labels = [], []
-        query_images, query_labels = [], []
 
-        for label, cls in enumerate(episode_classes):
+        # Create support set
+        support_images = torch.zeros(self.num_classes * self.num_support, 3, 84, 84)
+        support_labels = torch.zeros(
+            self.num_classes * self.num_support, dtype=torch.long
+        )
+
+        # Create query set
+        query_images = torch.zeros(self.num_classes * self.num_query, 3, 84, 84)
+        query_labels = torch.zeros(self.num_classes * self.num_query, dtype=torch.long)
+
+        for i, cls in enumerate(episode_classes):
+            # Get all images for this class
             images = self.class_to_images[cls]
-            samples = random.sample(images, self.num_support + self.num_query)
-            support_samples = samples[: self.num_support]
-            query_samples = samples[self.num_support :]
 
-            for img_path in support_samples:
-                image = Image.open(img_path).convert("RGB")
+            # Sample support and query images without replacement
+            selected_imgs = random.sample(images, self.num_support + self.num_query)
+            support_imgs = selected_imgs[: self.num_support]
+            query_imgs = selected_imgs[
+                self.num_support : self.num_support + self.num_query
+            ]
+
+            # Process support images
+            for j, img_path in enumerate(support_imgs):
+                img = Image.open(img_path).convert("RGB")
                 if self.transform:
-                    image = self.transform(image)
-                support_images.append(image)
-                support_labels.append(label)
+                    img = self.transform(img)
+                support_images[i * self.num_support + j] = img
+                support_labels[i * self.num_support + j] = i  # Use index as label
 
-            for img_path in query_samples:
-                image = Image.open(img_path).convert("RGB")
+            # Process query images
+            for j, img_path in enumerate(query_imgs):
+                img = Image.open(img_path).convert("RGB")
                 if self.transform:
-                    image = self.transform(image)
-                query_images.append(image)
-                query_labels.append(label)
-
-        # Convert lists to tensors.
-        support_images = torch.stack(
-            support_images
-        )  # [num_classes*num_support, C, H, W]
-        support_labels = torch.tensor(support_labels)
-        query_images = torch.stack(query_images)  # [num_classes*num_query, C, H, W]
-        query_labels = torch.tensor(query_labels)
+                    img = self.transform(img)
+                query_images[i * self.num_query + j] = img
+                query_labels[i * self.num_query + j] = i  # Use index as label
 
         return support_images, support_labels, query_images, query_labels
 

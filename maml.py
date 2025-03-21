@@ -7,7 +7,7 @@ import higher
 from torchvision import transforms
 import random
 from tqdm import tqdm
-from PIL import Image
+from datasets.dataloader import MiniImageNetMetaDataset
 
 # set random seed for reproducibility
 random.seed(222)
@@ -94,6 +94,36 @@ class Meta(nn.Module):
 
         return qry_loss, acc
 
+    def finetunning(self, x_spt, y_spt, x_qry, y_qry):
+        """
+        Finetuning procedure for evaluation. This function returns the accuracy after each update step.
+        It ensures that gradients are enabled for the inner-loop adaptation, even if called within a no_grad context.
+        """
+        inner_optimizer = torch.optim.SGD(self.net.parameters(), lr=self.args.inner_lr)
+        accs = []
+        # Ensure gradients are enabled for inner-loop updates.
+        with torch.set_grad_enabled(True):
+            with higher.innerloop_ctx(
+                self.net, inner_optimizer, track_higher_grads=False
+            ) as (fnet, diffopt):
+                # Evaluate before any updates.
+                logits_q = fnet(x_qry)
+                pred = torch.argmax(logits_q, dim=1)
+                correct = torch.eq(pred, y_qry).sum().item()
+                acc = correct / float(len(y_qry))
+                accs.append(acc)
+                # Finetuning updates.
+                for _ in range(self.args.update_step_test):
+                    logits = fnet(x_spt)
+                    loss = F.cross_entropy(logits, y_spt)
+                    diffopt.step(loss)
+                    logits_q = fnet(x_qry)
+                    pred = torch.argmax(logits_q, dim=1)
+                    correct = torch.eq(pred, y_qry).sum().item()
+                    acc = correct / float(len(y_qry))
+                    accs.append(acc)
+        return accs
+
 
 #################################
 # Training and Testing Functions
@@ -102,7 +132,6 @@ def maml_train(meta, meta_optimizer, data_loader, device="cuda"):
     meta.train()
     total_meta_loss = 0.0
     total_meta_acc = 0.0
-    meta_batch_size = data_loader.batch_size
 
     for batch_idx, (
         support_images,
@@ -111,36 +140,45 @@ def maml_train(meta, meta_optimizer, data_loader, device="cuda"):
         query_labels,
     ) in enumerate(tqdm(data_loader)):
         meta_optimizer.zero_grad()
-        task_accs = []
-        total_loss = 0  # Accumulator for loss
+        batch_size = support_images.size(0)
 
-        for i in range(meta_batch_size):
+        # Accumulate loss across tasks
+        meta_batch_loss = 0
+        task_accs = []
+
+        # Process each task in the batch
+        for i in range(batch_size):
             x_spt = support_images[i].to(device)
             y_spt = support_labels[i].to(device)
             x_qry = query_images[i].to(device)
             y_qry = query_labels[i].to(device)
 
+            # Forward pass
             qry_loss, acc = meta(x_spt, y_spt, x_qry, y_qry)
-            total_loss += qry_loss / meta_batch_size  # Accumulate normalized loss
+
+            # Accumulate loss (normalize by batch size)
+            meta_batch_loss += qry_loss / batch_size
             task_accs.append(acc)
 
         # Single backward pass on accumulated loss
-        total_loss.backward()
+        meta_batch_loss.backward()
 
-        # Clip gradients after backward pass but before optimizer step
+        # Clip gradients
         torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=0.5)
+
+        # Update meta-parameters
         meta_optimizer.step()
 
-        # Print individual task accuracies for this meta-batch
+        # Print progress
         avg_acc = sum(task_accs) / len(task_accs)
         if batch_idx % 30 == 0:
             tqdm.write(f"\nMeta-Batch {batch_idx + 1}/{len(data_loader)}:")
             for i, acc in enumerate(task_accs):
                 tqdm.write(f"  Task {i + 1}: Acc = {acc:.2%}")
-            tqdm.write(f"  Avg Acc: {avg_acc:.2%}")
+            tqdm.write(f"  Avg Acc: {avg_acc:.2%}, Loss: {meta_batch_loss.item():.4f}")
 
         # Track for epoch averages
-        total_meta_loss += total_loss.item()
+        total_meta_loss += meta_batch_loss.item()
         total_meta_acc += avg_acc
 
     avg_meta_loss = total_meta_loss / len(data_loader)
@@ -189,40 +227,32 @@ def maml_test(meta, test_loader, device="cuda"):
 
 
 def main():
-    # Hyperparameters modeled after the paper and official repo.
+    # Hyperparameters matched to reference implementation
     class Args:
         n_way = 5
         k_shot = 1
-        k_query = 15
-        update_step = 5  # Inner loop steps for training.
-        update_step_test = 10  # More inner loop steps for testing (as in reference)
-        inner_lr = 0.01  # Learning rate for adaptation
+        k_query = 15  # Standard for Mini-ImageNet
+        update_step = 5  # Inner loop updates for training
+        update_step_test = 10  # Inner loop updates for testing (more steps)
+        inner_lr = 0.01  # Fast adaptation learning rate
         meta_lr = 0.001  # Meta learning rate
-        meta_batch_size = 4  # Meta batch size (number of tasks per batch)
-        episodes = 10000  # Total episodes for training (as in reference)
-        # Adjust epochs based on episodes/meta_batch_size
-        epoch = episodes // meta_batch_size // 1000  # Evaluate every 1000 batches
+        batch_size = 4  # Meta batch size (tasks per update)
+        episodes = 10000  # Total episodes to train
+        epoch = 6  # For tracking progress (not actual epochs)
 
     args = Args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Transforms for mini‑ImageNet.
+    # Transforms for Mini-ImageNet
     imagenet_transform = transforms.Compose(
         [
-            # lambda x: Image.open(x).convert("RGB"),
             transforms.Resize((84, 84)),
-            # transforms.RandomHorizontalFlip(),
-            # transforms.RandomRotation(5),
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]
     )
 
-    # Create dataset using the CSV splits (make sure paths are updated)
-    from datasets.dataloader import (
-        MiniImageNetMetaDataset,
-    )  # Import your CSV-based dataset.
-
+    # Create datasets
     train_dataset = MiniImageNetMetaDataset(
         root="./datasets/MiniImageNet/",
         csv_file="./datasets/MiniImageNet/train.csv",
@@ -232,6 +262,7 @@ def main():
         transform=imagenet_transform,
         episodes=args.episodes,
     )
+
     test_dataset = MiniImageNetMetaDataset(
         root="./datasets/MiniImageNet/",
         csv_file="./datasets/MiniImageNet/test.csv",
@@ -239,38 +270,78 @@ def main():
         num_support=args.k_shot,
         num_query=args.k_query,
         transform=imagenet_transform,
-        episodes=100,  # Use fewer episodes for testing.
+        episodes=600,  # Fewer episodes for testing
     )
 
+    # Create data loaders
     train_loader = DataLoader(
-        train_dataset, batch_size=args.meta_batch_size, shuffle=True, num_workers=4
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=args.meta_batch_size, shuffle=True, num_workers=4
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
     )
 
-    # Initialize the model and meta learner.
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=1,  # Process one task at a time for testing
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    # Initialize model with Xavier/Glorot initialization
     model = MAMLConvNet(n_way=args.n_way).to(device)
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            nn.init.xavier_uniform_(m.weight)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+
+    # Create meta-learner
     meta = Meta(args, model).to(device)
     meta_optimizer = optim.Adam(meta.parameters(), lr=args.meta_lr)
 
-    global_step = 0
-    # Inside the main() training loop:
-    global_step = 0
+    # Training loop
+    best_acc = 0
     for epoch in range(1, args.epoch + 1):
+        print(f"\n=== Epoch {epoch}/{args.epoch} ===")
+
+        # Train
         avg_meta_loss, avg_meta_acc = maml_train(
             meta, meta_optimizer, train_loader, device
         )
-        print(f"\nEpoch {epoch} Summary:")
-        print(f"  Avg Loss: {avg_meta_loss:.4f}")
-        print(f"  Avg Acc: {avg_meta_acc:.2%}")
+        print(f"Train: Loss = {avg_meta_loss:.4f}, Accuracy = {avg_meta_acc:.2%}")
 
-        # Evaluate every N epochs
-        if epoch % 1 == 0:  # Adjust frequency as needed
+        # Test every 10 epochs
+        if epoch % 1 == 0:
             avg_step_accs = maml_test(meta, test_loader, device)
-            print("\nTest Summary:")
+            print("\nTest Results:")
             for step, acc in enumerate(avg_step_accs):
                 print(f"  Step {step}: Avg Acc = {acc:.2%}")
+
+            # Track best model
+            final_acc = avg_step_accs[-1]
+            if final_acc > best_acc:
+                best_acc = final_acc
+                torch.save(
+                    meta.state_dict(),
+                    f"maml_mini_imagenet_{args.n_way}way_{args.k_shot}shot_best.pt",
+                )
+
+        # Save checkpoint
+        if epoch % 20 == 0:
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": meta.state_dict(),
+                    "optimizer_state_dict": meta_optimizer.state_dict(),
+                    "loss": avg_meta_loss,
+                },
+                f"maml_mini_imagenet_{args.n_way}way_{args.k_shot}shot_epoch{epoch}.pt",
+            )
+
+    print(f"Training completed. Best accuracy: {best_acc:.2%}")
 
 
 if __name__ == "__main__":
