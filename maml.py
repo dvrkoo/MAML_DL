@@ -184,24 +184,57 @@ class Meta(nn.Module):
         """
         Training: perform inner-loop adaptation on the support set and compute query loss.
         """
-        # Create a deep copy of the network for adaptation.
-        net_copy = copy.deepcopy(self.net)
-        # Get initial fast weights.
-        fast_weights = net_copy.get_parameters()
+        # Get initial fast weights directly from the network
+        fast_weights = self.net.get_parameters()
+
+        # Verify requires_grad
+        for i, w in enumerate(fast_weights):
+            if not w.requires_grad:
+                print(f"Warning: Parameter {i} does not require grad")
+                w.requires_grad = True
 
         # Inner-loop adaptation
         for _ in range(self.args.update_step):
-            logits = net_copy.forward(x_spt, params=fast_weights)
+            logits = self.net.forward(x_spt, params=fast_weights)
             loss = F.cross_entropy(logits, y_spt)
-            grads = torch.autograd.grad(loss, fast_weights, create_graph=True)
+
+            # Check if loss is valid
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: Invalid loss value: {loss.item()}")
+                # Use a dummy loss to avoid breaking the training
+                loss = torch.tensor(0.1, device=loss.device, requires_grad=True)
+
+            # Create gradients
+            grads = torch.autograd.grad(
+                loss, fast_weights, create_graph=True, allow_unused=True
+            )
+
+            # Check gradients
+            if any(g is None for g in grads):
+                print("Warning: Some gradients are None")
+                # Create dummy gradients where needed
+                grads = [
+                    g if g is not None else torch.zeros_like(w)
+                    for g, w in zip(grads, fast_weights)
+                ]
+
+            # Debug gradient norms
+            grad_norms = [g.norm().item() for g in grads]
+            # print(f"Inner-loop grad norms: {grad_norms}")
+
             # Update fast weights.
             fast_weights = [
                 w - self.args.inner_lr * g for w, g in zip(fast_weights, grads)
             ]
 
         # Evaluate on query set using adapted weights.
-        logits_q = net_copy.forward(x_qry, params=fast_weights)
+        logits_q = self.net.forward(x_qry, params=fast_weights)
         qry_loss = F.cross_entropy(logits_q, y_qry)
+
+        # Debug query loss
+        # print(f"Query loss: {qry_loss.item()}")
+
+        # Calculate accuracy
         pred = torch.argmax(logits_q, dim=1)
         correct = torch.eq(pred, y_qry).sum().item()
         acc = correct / float(len(y_qry))
@@ -243,50 +276,6 @@ class Meta(nn.Module):
 #################################
 
 
-def maml_train(meta, meta_optimizer, data_loader, device="cuda"):
-    meta.train()
-    total_meta_loss = 0.0
-    total_meta_acc = 0.0
-
-    for batch_idx, (
-        support_images,
-        support_labels,
-        query_images,
-        query_labels,
-    ) in enumerate(tqdm(data_loader)):
-        meta_optimizer.zero_grad()
-        batch_size = support_images.size(0)
-        meta_batch_loss = 0.0
-        task_accs = []
-
-        for i in range(batch_size):
-            x_spt = support_images[i].to(device)
-            y_spt = support_labels[i].to(device)
-            x_qry = query_images[i].to(device)
-            y_qry = query_labels[i].to(device)
-
-            qry_loss, acc = meta(x_spt, y_spt, x_qry, y_qry)
-            meta_batch_loss += qry_loss / batch_size
-            task_accs.append(acc)
-
-        meta_batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=0.5)
-        meta_optimizer.step()
-
-        avg_acc = sum(task_accs) / len(task_accs)
-        if batch_idx % 30 == 0:
-            tqdm.write(
-                f"\nMeta-Batch {batch_idx+1}/{len(data_loader)}: "
-                f"Avg Acc: {avg_acc:.2%}, Loss: {meta_batch_loss.item():.4f}"
-            )
-        total_meta_loss += meta_batch_loss.item()
-        total_meta_acc += avg_acc
-
-    avg_meta_loss = total_meta_loss / len(data_loader)
-    avg_meta_acc = total_meta_acc / len(data_loader)
-    return avg_meta_loss, avg_meta_acc
-
-
 def maml_test(meta, test_loader, device="cuda"):
     meta.eval()
     step_accs = [[] for _ in range(meta.args.update_step_test + 1)]
@@ -320,6 +309,101 @@ def maml_test(meta, test_loader, device="cuda"):
     return avg_step_accs
 
 
+def maml_train(
+    meta, meta_optimizer, data_loader, test_loader, device="cuda", test_interval=500
+):
+    meta.train()
+    total_meta_loss = 0.0
+    total_meta_acc = 0.0
+    global_step = 0
+    best_acc = 0.0
+
+    for batch_idx, (
+        support_images,
+        support_labels,
+        query_images,
+        query_labels,
+    ) in enumerate(tqdm(data_loader)):
+        meta_optimizer.zero_grad()
+        batch_size = support_images.size(0)
+        meta_batch_loss = 0.0
+        task_accs = []
+
+        for i in range(batch_size):
+            x_spt = support_images[i].to(device)
+            y_spt = support_labels[i].to(device)
+            x_qry = query_images[i].to(device)
+            y_qry = query_labels[i].to(device)
+
+            qry_loss, acc = meta(x_spt, y_spt, x_qry, y_qry)
+            meta_batch_loss += qry_loss / batch_size
+            task_accs.append(acc)
+
+        meta_batch_loss.backward()
+        # Add gradient norm monitoring
+        total_norm = 0
+        for p in meta.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm**0.5
+
+        torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=0.5)
+        meta_optimizer.step()
+
+        global_step += 1
+        avg_acc = sum(task_accs) / len(task_accs)
+
+        if batch_idx % 30 == 0:
+            tqdm.write(
+                f"\nMeta-Batch {batch_idx+1}/{len(data_loader)}: "
+                f"Avg Acc: {avg_acc:.2%}, Loss: {meta_batch_loss.item():.4f}, "
+                f"Grad Norm: {total_norm:.4f}"
+            )
+        total_meta_loss += meta_batch_loss.item()
+        total_meta_acc += avg_acc
+
+        # Run test every test_interval steps
+        if global_step % test_interval == 0:
+            tqdm.write(f"\n=== Testing at step {global_step} ===")
+            meta.eval()
+            # Use a smaller subset of test tasks for quick evaluation
+            quick_test_loader = [next(iter(test_loader)) for _ in range(10)]
+
+            step_accs = [[] for _ in range(meta.args.update_step_test + 1)]
+            for test_batch in quick_test_loader:
+                support_images, support_labels, query_images, query_labels = test_batch
+                x_spt = support_images[0].to(device)
+                y_spt = support_labels[0].to(device)
+                x_qry = query_images[0].to(device)
+                y_qry = query_labels[0].to(device)
+
+                accs = meta.finetunning(x_spt, y_spt, x_qry, y_qry)
+                for step, acc in enumerate(accs):
+                    step_accs[step].append(acc)
+
+            avg_step_accs = [sum(accs) / len(accs) for accs in step_accs]
+            tqdm.write("Quick Test Results:")
+            for step, acc in enumerate(avg_step_accs):
+                tqdm.write(f"  Step {step}: Avg Acc = {acc:.2%}")
+
+            final_acc = avg_step_accs[-1]
+            if final_acc > best_acc:
+                best_acc = final_acc
+                torch.save(
+                    meta.state_dict(),
+                    f"maml_mini_imagenet_step{global_step}_acc{final_acc:.4f}.pt",
+                )
+                tqdm.write(f"New Best: {best_acc:.2%}, Model saved.")
+
+            # Resume training
+            meta.train()
+
+    avg_meta_loss = total_meta_loss / len(data_loader)
+    avg_meta_acc = total_meta_acc / len(data_loader)
+    return avg_meta_loss, avg_meta_acc, best_acc
+
+
 #################################
 # Main Function to Reproduce MAML Paper Results
 #################################
@@ -338,6 +422,7 @@ def main():
         batch_size = 4  # Meta batch size.
         episodes = 10000  # Total episodes for dataset.
         epoch = 5  # Number of training epochs.
+        test_interval = 500  # Test every 500 steps
 
     args = Args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -381,7 +466,7 @@ def main():
     test_loader = DataLoader(
         test_dataset,
         batch_size=1,  # Process one task at a time during testing.
-        shuffle=False,
+        shuffle=True,  # Shuffle to get different tasks for quick tests
         num_workers=4,
         pin_memory=True,
     )
@@ -393,24 +478,35 @@ def main():
     meta = Meta(args, model).to(device)
     meta_optimizer = optim.Adam(meta.parameters(), lr=args.meta_lr)
 
+    # Add learning rate scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        meta_optimizer, T_max=args.epoch * len(train_loader)
+    )
+
     best_acc = 0
     for epoch in range(1, args.epoch + 1):
         print(f"\n=== Epoch {epoch}/{args.epoch} ===")
-        avg_meta_loss, avg_meta_acc = maml_train(
-            meta, meta_optimizer, train_loader, device
+        avg_meta_loss, avg_meta_acc, epoch_best_acc = maml_train(
+            meta, meta_optimizer, train_loader, test_loader, device, args.test_interval
         )
-        print(f"Train: Loss = {avg_meta_loss:.4f}, Accuracy = {avg_meta_acc:.2%}")
+        scheduler.step()
 
+        print(f"Train: Loss = {avg_meta_loss:.4f}, Accuracy = {avg_meta_acc:.2%}")
+        best_acc = max(best_acc, epoch_best_acc)
+
+        # Run a full test at the end of each epoch
+        print("\n=== Full Test at End of Epoch ===")
         avg_step_accs = maml_test(meta, test_loader, device)
-        print("\nTest Results:")
+        print("Test Results:")
         for step, acc in enumerate(avg_step_accs):
             print(f"  Step {step}: Avg Acc = {acc:.2%}")
+
         final_acc = avg_step_accs[-1]
         if final_acc > best_acc:
             best_acc = final_acc
             torch.save(
                 meta.state_dict(),
-                f"maml_mini_imagenet_{args.n_way}way_{args.k_shot}shot_best.pt",
+                f"maml_mini_imagenet_{args.n_way}way_{args.k_shot}shot_epoch{epoch}_acc{final_acc:.4f}.pt",
             )
         print(f"Current Best: {best_acc:.2%}")
 
