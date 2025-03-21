@@ -117,10 +117,10 @@ class MiniImageNetMetaDataset(Dataset):
 
 
 class OmniglotMetaDataset(Dataset):
-    urls = [
-        "https://github.com/brendenlake/omniglot/raw/master/python/images_background.zip",
-        "https://github.com/brendenlake/omniglot/raw/master/python/images_evaluation.zip",
-    ]
+    urls = {
+        "images_background": "https://github.com/brendenlake/omniglot/raw/master/python/images_background.zip",
+        "images_evaluation": "https://github.com/brendenlake/omniglot/raw/master/python/images_evaluation.zip",
+    }
 
     def __init__(
         self,
@@ -133,17 +133,6 @@ class OmniglotMetaDataset(Dataset):
         background=True,
         episodes=10000,
     ):
-        """
-        Args:
-            root (str): Base directory where the raw and processed files will be stored.
-            num_classes (int): n-way.
-            num_support (int): k-shot support examples per class.
-            num_query (int): Number of query examples per class.
-            transform: torchvision transforms.
-            download (bool): If True, downloads the dataset.
-            background (bool): If True, uses the 'images_background' set; otherwise, 'images_evaluation'.
-            episodes (int): Number of episodes.
-        """
         self.root = root
         self.transform = transform
         self.num_classes = num_classes
@@ -152,92 +141,107 @@ class OmniglotMetaDataset(Dataset):
         self.download = download
         self.background = background
         self.episodes = episodes
+        self.class_to_images = {}  # Critical fix: Initialize dict
 
         if self.download:
             self._download_and_extract()
 
-        # Define which subset to use.
+        # Define which subset to use
         subset = "images_background" if self.background else "images_evaluation"
-        assert subset in ["images_background", "images_evaluation"], "Invalid subset."
         self.data_path = os.path.join(self.root, "processed", subset)
-        self.classes = self._load_classes_with_rotations()
+
+        if not os.path.exists(self.data_path):
+            raise RuntimeError(f"Dataset not found. Use download=True")
+
+        self._load_classes_with_rotations()
 
     def _load_classes_with_rotations(self):
-        classes = []
-        for alphabet in os.listdir(self.data_path):
+        self.classes = []
+        for alphabet in sorted(os.listdir(self.data_path)):
             alphabet_path = os.path.join(self.data_path, alphabet)
             if not os.path.isdir(alphabet_path):
                 continue
-            for character in os.listdir(alphabet_path):
+
+            for character in sorted(os.listdir(alphabet_path)):
                 character_path = os.path.join(alphabet_path, character)
-                if os.path.isdir(character_path):
-                    # Add original + rotated versions as separate classes
-                    for rot in [0, 90, 180, 270]:
-                        class_name = f"{alphabet}_{character}_rot{rot}"
-                        images = [
-                            os.path.join(character_path, img)
-                            for img in os.listdir(character_path)
-                            if img.endswith(".png")
-                        ]
-                        # Ensure enough samples per class
-                        if len(images) >= (self.num_support + self.num_query):
-                            self.class_to_images[class_name] = images
-                            classes.append(class_name)
-        return classes
+                if not os.path.isdir(character_path):
+                    continue
+
+                # Original images (20 per character)
+                image_paths = [
+                    os.path.join(character_path, img)
+                    for img in sorted(os.listdir(character_path))
+                    if img.endswith(".png")
+                ]
+
+                # Create 4 rotated versions per character
+                for rotation in [0, 90, 180, 270]:
+                    class_name = f"{alphabet}_{character}_rot{rotation}"
+                    if len(image_paths) >= (self.num_support + self.num_query):
+                        self.class_to_images[class_name] = image_paths
+                        self.classes.append(class_name)
 
     def _download_and_extract(self):
-        raw_folder = os.path.join(self.root, "raw")
-        processed_folder = os.path.join(self.root, "processed")
-        os.makedirs(raw_folder, exist_ok=True)
-        os.makedirs(processed_folder, exist_ok=True)
+        os.makedirs(self.root, exist_ok=True)
+        subset = "images_background" if self.background else "images_evaluation"
+        url = self.urls[subset]
 
-        # Download each zip file if it does not exist.
-        for url in self.urls:
-            filename = url.split("/")[-1]
-            filepath = os.path.join(raw_folder, filename)
-            if not os.path.exists(filepath):
-                print(f"Downloading {url}...")
-                urllib.request.urlretrieve(url, filepath)
-            # Extract contents to the processed folder.
-            with zipfile.ZipFile(filepath, "r") as zip_ref:
-                print(f"Extracting {filename}...")
-                zip_ref.extractall(processed_folder)
+        # Download
+        zip_path = os.path.join(self.root, f"{subset}.zip")
+        if not os.path.exists(zip_path):
+            print(f"Downloading {subset}...")
+            urllib.request.urlretrieve(url, zip_path)
+
+        # Extract
+        print(f"Extracting {subset}...")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(os.path.join(self.root, "processed"))
 
     def __len__(self):
         return self.episodes
 
     def __getitem__(self, idx):
-        episode_classes = random.sample(self.classes, self.num_classes)
-        support_images, support_labels = [], []
-        query_images, query_labels = [], []
+        # Sample n-way classes
+        sampled_classes = random.sample(self.classes, self.num_classes)
 
-        for label, cls in enumerate(episode_classes):
-            images = self.class_to_images[cls]
-            rotation = int(cls.split("_")[-1])  # Extract rotation angle
-            samples = random.sample(images, self.num_support + self.num_query)
-            support_samples = samples[: self.num_support]
-            query_samples = samples[self.num_support :]
+        support_images = []
+        support_labels = []
+        query_images = []
+        query_labels = []
 
-            for img_path in support_samples:
-                # Omniglot images are grayscale.
-                image = Image.open(img_path).convert("L")
-                image = image.rotate(rotation)  # Apply rotation
+        for class_idx, class_name in enumerate(sampled_classes):
+            # Extract rotation from class name
+            rotation = int(class_name.split("_rot")[-1])
+
+            # Get all images for this class
+            image_paths = self.class_to_images[class_name]
+
+            # Randomly select support+query images
+            selected_paths = random.sample(
+                image_paths, self.num_support + self.num_query
+            )
+
+            # Process support images
+            for path in selected_paths[: self.num_support]:
+                img = Image.open(path).convert("L").rotate(rotation)
                 if self.transform:
-                    image = self.transform(image)
-                support_images.append(image)
-                support_labels.append(label)
+                    img = self.transform(img)
+                support_images.append(img)
+                support_labels.append(class_idx)
 
-            for img_path in query_samples:
-                image = Image.open(img_path).convert("L")
+            # Process query images
+            for path in selected_paths[self.num_support :]:
+                img = Image.open(path).convert("L").rotate(rotation)
                 if self.transform:
-                    image = self.transform(image)
-                query_images.append(image)
-                query_labels.append(label)
+                    img = self.transform(img)
+                query_images.append(img)
+                query_labels.append(class_idx)
 
+        # Stack tensors
         support_images = torch.stack(support_images)
-        support_labels = torch.tensor(support_labels)
         query_images = torch.stack(query_images)
-        query_labels = torch.tensor(query_labels)
+        support_labels = torch.tensor(support_labels, dtype=torch.long)
+        query_labels = torch.tensor(query_labels, dtype=torch.long)
 
         return support_images, support_labels, query_images, query_labels
 

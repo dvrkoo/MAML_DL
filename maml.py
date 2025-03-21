@@ -14,9 +14,74 @@ from datasets.dataloader import MiniImageNetMetaDataset, OmniglotMetaDataset
 random.seed(222)
 torch.manual_seed(222)
 
+
 #################################
 # Model Components (as in the paper)
 #################################
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class MAMLFCNet(nn.Module):
+    def __init__(self, n_way, input_dim=784, hidden_size=256):
+        super().__init__()
+        self.n_way = n_way
+        self.input_dim = input_dim
+
+        # Define layers
+        self.fc1 = nn.Linear(input_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, hidden_size)
+        self.fc4 = nn.Linear(hidden_size, hidden_size)
+        self.classifier = nn.Linear(hidden_size, n_way)
+
+        # Xavier initialization
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x, params=None):
+        batch_size = x.size(0)
+        # Correctly reshape: maintain batch dimension, flatten the rest
+        x = x.view(batch_size, -1)
+
+        if params is None:
+            # Use model's parameters
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+            x = F.relu(self.fc4(x))
+            x = self.classifier(x)
+            return x
+        else:
+            # Use custom params
+            x = F.linear(x, params[0], params[1])
+            x = F.relu(x)
+            x = F.linear(x, params[2], params[3])
+            x = F.relu(x)
+            x = F.linear(x, params[4], params[5])
+            x = F.relu(x)
+            x = F.linear(x, params[6], params[7])
+            x = F.relu(x)
+            x = F.linear(x, params[8], params[9])
+            return x
+
+    def get_parameters(self):
+        # Return parameters in the order expected by forward()
+        return [
+            self.fc1.weight,
+            self.fc1.bias,
+            self.fc2.weight,
+            self.fc2.bias,
+            self.fc3.weight,
+            self.fc3.bias,
+            self.fc4.weight,
+            self.fc4.bias,
+            self.classifier.weight,
+            self.classifier.bias,
+        ]
 
 
 def conv_block(in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -404,7 +469,8 @@ def maml_train(
                 best_acc = final_acc
                 torch.save(
                     meta.state_dict(),
-                    f"./mp/maml_mini_imagenet_step{global_step}_acc{final_acc:.4f}.pt",
+                    # f"./mp/maml_{"MiniImageNet" if }_step{global_step}_acc{final_acc:.4f}.pt",
+                    f"./mp/maml{'_omniglot' if meta.args.omniglot else ''}_step{global_step}_k_{meta.args.k_shot}_n_way{meta.args.n_way}.pt",
                 )
                 tqdm.write(f"New Best: {best_acc:.2%}, Model saved.")
 
@@ -437,6 +503,7 @@ def main():
         test_interval = 500  # Test every 500 steps
         first_order = False
         omniglot = True
+        conv = False
 
     args = Args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -456,6 +523,7 @@ def main():
             transforms.Grayscale(num_output_channels=1),  # Ensure 1 channel
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5], std=[0.5]),  # Grayscale normalization
+            # transforms.Lambda(lambda x: x.view(-1)),  # Flatten to 784
         ]
     )
     if not args.omniglot:
@@ -520,6 +588,9 @@ def main():
         model = MAMLConvNet(n_way=args.n_way).to(device)
     else:
         model = MAMLConvNet(n_way=args.n_way, in_channels=1, hidden_size=64).to(device)
+
+    if not args.conv:
+        model = MAMLFCNet(n_way=args.n_way).to(device)
 
     # Create meta-learner.
     meta = Meta(args, model).to(device)
