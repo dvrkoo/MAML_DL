@@ -145,6 +145,7 @@ class Meta(nn.Module):
         self.meta_optim.step()
 
         accs = np.array(corrects) / (querysz * task_num)
+        # print("Losses: ", losses_q)
 
         return accs
 
