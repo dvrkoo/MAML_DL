@@ -7,6 +7,7 @@ import random
 from tqdm import tqdm
 from datasets.dataloader import MiniImageNetMetaDataset, OmniglotMetaDataset
 from models import MAMLFCNet, MAMLConvNet, Meta
+import argparse
 
 
 # Set random seed for reproducibility
@@ -176,23 +177,40 @@ def maml_train(
 
 def main():
     # Hyperparameters as in the paper/official repo.
-    class Args:
-        n_way = 5
-        k_shot = 1
-        k_query = 15
-        update_step = 5  # Inner-loop updates for training.
-        update_step_test = 10  # Inner-loop updates for testing.
-        inner_lr = 0.01  # Fast adaptation learning rate.
-        meta_lr = 0.001  # Meta learning rate.
-        batch_size = 4  # Meta batch size.
-        episodes = 10000  # Total episodes for dataset.
-        epoch = 5  # Number of training epochs.
-        test_interval = 500  # Test every 500 steps
-        first_order = False
-        omniglot = True
-        conv = False
+    # class Args:
+    #     n_way = 5
+    #     k_shot = 1
+    #     k_query = 15
+    #     update_step = 5  # Inner-loop updates for training.
+    #     update_step_test = 10  # Inner-loop updates for testing.
+    #     inner_lr = 0.01  # Fast adaptation learning rate.
+    #     meta_lr = 0.001  # Meta learning rate.
+    #     batch_size = 4  # Meta batch size.
+    #     episodes = 10000  # Total episodes for dataset.
+    #     epoch = 5  # Number of training epochs.
+    #     test_interval = 500  # Test every 500 steps
+    #     first_order = False
+    #     omniglot = True
+    #     conv = False
 
-    args = Args()
+    # let's make args with parseargs
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n_way", type=int, default=5)
+    parser.add_argument("--k_shot", type=int, default=1)
+    parser.add_argument("--k_query", type=int, default=15)
+    parser.add_argument("--update_step", type=int, default=5)
+    parser.add_argument("--update_step_test", type=int, default=10)
+    parser.add_argument("--inner_lr", type=float, default=0.01)
+    parser.add_argument("--meta_lr", type=float, default=0.001)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--episodes", type=int, default=10000)
+    parser.add_argument("--epoch", type=int, default=5)
+    parser.add_argument("--test_interval", type=int, default=500)
+    parser.add_argument("--first_order", action="store_true")
+    parser.add_argument("--omniglot", action="store_true")
+    parser.add_argument("--conv", action="store_true")
+    args = parser.parse_args()
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     experiment.log_parameters(
         {
