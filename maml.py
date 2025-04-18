@@ -16,7 +16,7 @@ torch.manual_seed(222)
 
 
 experiment = Experiment(
-    api_key="WQRfjlovs7RSjYUmjlMvNt3PY", project_name="maml_project", workspace="dvrkoo"
+    api_key="WQRfjlovs7RSjYUmjlMvNt3PY", project_name="maml", workspace="dvrkoo"
 )
 
 #################################
@@ -66,100 +66,246 @@ def maml_test(meta, test_loader, device="cuda", epoch=None):
 
 
 def maml_train(
-    meta, meta_optimizer, data_loader, test_loader, device="cuda", test_interval=500
+    meta,  # The Meta model instance
+    meta_optimizer,  # The optimizer for meta-parameters (e.g., Adam)
+    data_loader,  # DataLoader for training tasks
+    val_loader,  # DataLoader for validation tasks (used for periodic checks)
+    device,  # Device ('cuda' or 'cpu')
+    test_interval,  # How often (in global steps) to run quick validation
+    global_step,  # Current global step count (passed in)
+    epoch,  # Current epoch number (for logging/TQDM)
+    scheduler=None,  # Optional learning rate scheduler
+    max_grad_norm=0.5,  # Max norm for gradient clipping
 ):
-    meta.train()
-    total_meta_loss = 0.0
-    total_meta_acc = 0.0
-    global_step = 0
-    best_acc = 0.0
+    """
+    Performs one epoch of MAML training.
 
+    Args:
+        meta: The Meta model instance.
+        meta_optimizer: Optimizer for meta-parameters.
+        data_loader: DataLoader for training tasks (yields batches of tasks).
+        test_loader: DataLoader for validation tasks.
+        device: Torch device.
+        test_interval: Frequency (in global steps) for running quick validation.
+        global_step: The current global step count before starting this epoch.
+        epoch: The current epoch number.
+        scheduler: Optional LR scheduler (stepped after each meta-update).
+        max_grad_norm: Value for gradient clipping.
+
+    Returns:
+        avg_epoch_query_loss (float): Average query loss across all meta-batches in the epoch.
+        avg_epoch_query_acc (float): Average query accuracy across all meta-batches in the epoch.
+        best_val_acc_in_epoch (float): Best final-step validation accuracy found during periodic checks *within this epoch*.
+        global_step (int): The updated global step count after finishing this epoch.
+    """
+    meta.train()  # Set model to training mode
+
+    # Accumulators for epoch-level averages
+    epoch_total_query_loss = 0.0
+    epoch_total_query_acc = 0.0
+    best_val_acc_in_epoch = (
+        0.0  # Tracks best validation accuracy found during this epoch's tests
+    )
+
+    # Iterate through meta-batches for one epoch
     for batch_idx, (
         support_images,
         support_labels,
         query_images,
         query_labels,
-    ) in enumerate(tqdm(data_loader)):
-        meta_optimizer.zero_grad()
-        batch_size = support_images.size(0)
-        meta_batch_loss = 0.0
-        task_accs = []
+    ) in enumerate(tqdm(data_loader, desc=f"Epoch {epoch} Training", leave=False)):
 
+        meta_optimizer.zero_grad()
+        batch_size = support_images.size(0)  # Number of tasks in this meta-batch
+
+        # Accumulators for the current meta-batch
+        meta_batch_query_loss_sum = 0.0  # Sum of query losses for tasks in the batch
+        meta_batch_query_accs = []  # List of query accuracies for tasks in the batch
+        meta_batch_inner_support_losses = (
+            []
+        )  # List of avg inner support losses per task
+        meta_batch_inner_support_accs = []  # List of avg inner support accs per task
+
+        # --- Inner Loop Simulation and Loss Accumulation ---
         for i in range(batch_size):
+            # Prepare task data
             x_spt = support_images[i].to(device)
             y_spt = support_labels[i].to(device)
             x_qry = query_images[i].to(device)
             y_qry = query_labels[i].to(device)
 
-            qry_loss, acc, inner_loss, inner_acc = meta(x_spt, y_spt, x_qry, y_qry)
-            meta_batch_loss += qry_loss / batch_size
-            task_accs.append(acc)
+            # Perform inner loop adaptation and get query loss + inner metrics for this task
+            # Assumes meta() returns: qry_loss, qry_acc, task_avg_inner_loss, task_avg_inner_acc
+            qry_loss, qry_acc, task_avg_inner_loss, task_avg_inner_acc = meta(
+                x_spt, y_spt, x_qry, y_qry
+            )
 
-        meta_batch_loss.backward()
-        # Add gradient norm monitoring
-        total_norm = 0
+            # Accumulate results for the meta-batch average calculation
+            meta_batch_query_loss_sum += qry_loss  # Sum losses before averaging
+            meta_batch_query_accs.append(qry_acc)
+            meta_batch_inner_support_losses.append(task_avg_inner_loss)
+            meta_batch_inner_support_accs.append(task_avg_inner_acc)
+
+        # --- Meta-Update ---
+        # 1. Calculate final average meta-loss for the batch
+        final_meta_batch_query_loss = meta_batch_query_loss_sum / batch_size
+        # 2. Compute gradients w.r.t. meta-parameters
+        final_meta_batch_query_loss.backward()
+
+        # 3. Calculate pre-clipping gradient norm (for logging)
+        total_norm_sq = 0
         for p in meta.parameters():
             if p.grad is not None:
                 param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        total_norm = total_norm**0.5
+                total_norm_sq += param_norm.item() ** 2
+        meta_gradient_norm_pre_clip = total_norm_sq**0.5
 
-        torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=0.5)
+        # 4. Clip gradients
+        torch.nn.utils.clip_grad_norm_(meta.parameters(), max_norm=max_grad_norm)
+
+        # 5. Update meta-parameters
         meta_optimizer.step()
+        if scheduler is not None:
+            scheduler.step()  # Step scheduler after optimizer
 
+        # 6. Increment global step counter
         global_step += 1
-        avg_acc = sum(task_accs) / len(task_accs)
-        # Log metrics more frequently with Comet
-        if experiment is not None and batch_idx % 10 == 0:
-            experiment.log_metrics(
-                {
-                    "batch_loss": meta_batch_loss.item(),
-                    "batch_accuracy": avg_acc,
-                    "gradient_norm": total_norm,
-                    "inner_loss": inner_loss,
-                    "inner_acc": inner_acc,
-                },
-                step=global_step,
-            )
+
+        # --- Calculate Averages for Logging ---
+        # Handle potential empty lists if batch_size was 0 or data issue
+        avg_meta_batch_query_acc = (
+            sum(meta_batch_query_accs) / len(meta_batch_query_accs)
+            if meta_batch_query_accs
+            else 0.0
+        )
+        avg_meta_batch_inner_loss = (
+            sum(meta_batch_inner_support_losses) / len(meta_batch_inner_support_losses)
+            if meta_batch_inner_support_losses
+            else 0.0
+        )
+        avg_meta_batch_inner_acc = (
+            sum(meta_batch_inner_support_accs) / len(meta_batch_inner_support_accs)
+            if meta_batch_inner_support_accs
+            else 0.0
+        )
+
+        # --- Logging to Comet (per meta-batch/step) ---
+        if experiment is not None and batch_idx % 10 == 0:  # Log every 10 batches
+            log_dict_train = {
+                "train/meta_batch_query_loss": final_meta_batch_query_loss.item(),
+                "train/meta_batch_query_accuracy": avg_meta_batch_query_acc,
+                "train/meta_gradient_norm_pre_clip": meta_gradient_norm_pre_clip,
+                "train/meta_batch_avg_inner_support_loss": avg_meta_batch_inner_loss,
+                "train/meta_batch_avg_inner_support_accuracy": avg_meta_batch_inner_acc,
+            }
+            # Log accumulated metrics against the global step
+            experiment.log_metrics(log_dict_train, step=global_step)
+
+        # --- Console Output (less frequent) ---
         if batch_idx % 30 == 0:
             tqdm.write(
-                f"\nMeta-Batch {batch_idx+1}/{len(data_loader)}: "
-                f"Avg Acc: {avg_acc:.2%}, Loss: {meta_batch_loss.item():.4f}, "
-                f"Grad Norm: {total_norm:.4f}"
+                f"\nEpoch {epoch} | Batch {batch_idx+1}/{len(data_loader)} | Step {global_step} | "
+                f"Query Acc: {avg_meta_batch_query_acc:.2%} | Query Loss: {final_meta_batch_query_loss.item():.4f} | "
+                f"Grad Norm: {meta_gradient_norm_pre_clip:.4f}"
             )
-        total_meta_loss += meta_batch_loss.item()
-        total_meta_acc += avg_acc
 
-        # Run test every test_interval steps
+        # --- Accumulate for Epoch Average ---
+        epoch_total_query_loss += final_meta_batch_query_loss.item()
+        epoch_total_query_acc += avg_meta_batch_query_acc
+
+        # --- Periodic Quick Validation ---
         if global_step % test_interval == 0:
-            tqdm.write(f"\n=== Testing at step {global_step} ===")
-            meta.eval()
-            # Use a smaller subset of test tasks for quick evaluation
-            quick_test_loader = [next(iter(test_loader)) for _ in range(10)]
+            tqdm.write(f"\n=== Quick Validation at Step {global_step} ===")
+            meta.eval()  # Switch to evaluation mode
 
-            step_accs = [[] for _ in range(meta.args.update_step_test + 1)]
-            for test_batch in quick_test_loader:
-                support_images, support_labels, query_images, query_labels = test_batch
-                x_spt = support_images[0].to(device)
-                y_spt = support_labels[0].to(device)
-                x_qry = query_images[0].to(device)
-                y_qry = query_labels[0].to(device)
+            val_tasks_to_run = min(
+                50, len(val_loader)
+            )  # Number of tasks for quick validation
+            quick_val_batches = []
+            test_iter = iter(val_loader)  # Create iterator for test loader
+            try:
+                for _ in range(val_tasks_to_run):
+                    quick_val_batches.append(next(test_iter))
+            except StopIteration:
+                tqdm.write(
+                    f"Warning: Test loader exhausted after {len(quick_val_batches)} tasks for quick validation."
+                )
+                pass  # Continue with obtained tasks
 
-                accs = meta.finetunning(x_spt, y_spt, x_qry, y_qry)
-                for step, acc in enumerate(accs):
-                    step_accs[step].append(acc)
+            if not quick_val_batches:
+                tqdm.write("Warning: No tasks available for quick validation.")
+                meta.train()  # Switch back to train mode
+                continue  # Skip validation if no tasks
 
-            avg_step_accs = [sum(accs) / len(accs) for accs in step_accs]
-            tqdm.write("Quick Test Results:")
-            for step, acc in enumerate(avg_step_accs):
+            # Accumulator for validation accuracies at each adaptation step
+            val_step_accs_all_tasks = [
+                [] for _ in range(meta.args.update_step_test + 1)
+            ]
+
+            # Run finetuning on validation tasks
+            # NO torch.no_grad() here, as finetuning needs internal grad calculation
+            for val_batch in quick_val_batches:
+                # Assuming test loader batch size is 1
+                (
+                    support_images_val,
+                    support_labels_val,
+                    query_images_val,
+                    query_labels_val,
+                ) = val_batch
+                x_spt_val = support_images_val[0].to(device)
+                y_spt_val = support_labels_val[0].to(device)
+                x_qry_val = query_images_val[0].to(device)
+                y_qry_val = query_labels_val[0].to(device)
+
+                # finetunning returns list of accuracies per step
+                accs_val_per_step = meta.finetunning(
+                    x_spt_val, y_spt_val, x_qry_val, y_qry_val
+                )
+
+                # Store accuracy for each step
+                for step_idx, acc in enumerate(accs_val_per_step):
+                    if step_idx < len(val_step_accs_all_tasks):  # Safety check
+                        val_step_accs_all_tasks[step_idx].append(acc)
+
+            # Calculate average accuracy per step across validation tasks
+            avg_val_step_accs = []
+            for step_accs in val_step_accs_all_tasks:
+                avg_val_step_accs.append(
+                    sum(step_accs) / len(step_accs) if step_accs else 0.0
+                )
+
+            # Log and Print Validation Results
+            tqdm.write("Quick Validation Results:")
+            for step, acc in enumerate(avg_val_step_accs):
                 tqdm.write(f"  Step {step}: Avg Acc = {acc:.2%}")
 
-            # Resume training
-            meta.train()
+            # Check for New Best Validation Accuracy (within this epoch)
+            final_val_acc = avg_val_step_accs[
+                -1
+            ]  # Accuracy after final adaptation step
+            if final_val_acc > best_val_acc_in_epoch:
+                best_val_acc_in_epoch = final_val_acc
+                # Optional: Save a temporary 'best_in_epoch' model here if desired
+                # torch.save(...)
+                tqdm.write(
+                    f"** New best quick validation accuracy during epoch: {best_val_acc_in_epoch:.2%} **"
+                )
 
-    avg_meta_loss = total_meta_loss / len(data_loader)
-    avg_meta_acc = total_meta_acc / len(data_loader)
-    return avg_meta_loss, avg_meta_acc, best_acc
+            # Resume training mode
+            meta.train()
+        # --- End Periodic Validation ---
+
+    # --- End of Epoch Calculation ---
+    num_batches = len(data_loader)
+    avg_epoch_query_loss = (
+        epoch_total_query_loss / num_batches if num_batches > 0 else 0.0
+    )
+    avg_epoch_query_acc = (
+        epoch_total_query_acc / num_batches if num_batches > 0 else 0.0
+    )
+
+    # Return epoch averages, best validation accuracy found during this epoch, and updated global step
+    return avg_epoch_query_loss, avg_epoch_query_acc, best_val_acc_in_epoch, global_step
 
 
 #################################
@@ -201,6 +347,7 @@ def main():
     parser.add_argument("--first_order", action="store_true")
     parser.add_argument("--omniglot", action="store_true")
     parser.add_argument("--conv", action="store_true")
+    parser.add_argument("--full_test_epoch_interval", type=int, default=1)
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -251,6 +398,16 @@ def main():
             transform=imagenet_transform,
             episodes=args.episodes,
         )
+        val_dataset = MiniImageNetMetaDataset(
+            root="./datasets/MiniImageNet/",
+            csv_file="./datasets/MiniImageNet/val.csv",
+            num_classes=args.n_way,
+            num_support=args.k_shot,
+            num_query=args.k_query,
+            transform=imagenet_transform,
+            episodes=args.episodes,
+        )
+
         test_dataset = MiniImageNetMetaDataset(
             root="./datasets/MiniImageNet/",
             csv_file="./datasets/MiniImageNet/test.csv",
@@ -269,6 +426,16 @@ def main():
             transform=omniglot_transform,
             background=True,  # Use images_background
             episodes=60000,  # Match paper's 60k tasks
+        )
+        # Test set: 20 alphabets (evaluation) + rotations
+        val_dataset = OmniglotMetaDataset(
+            root="./datasets/omniglot",
+            num_classes=args.n_way,
+            num_support=args.k_shot,
+            num_query=15,
+            transform=omniglot_transform,
+            background=False,  # Use images_evaluation
+            episodes=1000,  # Evaluate on 1k tasks
         )
 
         # Test set: 20 alphabets (evaluation) + rotations
@@ -289,6 +456,14 @@ def main():
         num_workers=4,
         pin_memory=True,
     )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,  # Process one task at a time during validation
+        shuffle=True,  # Shuffle to get different tasks for quick tests
+        num_workers=4,
+        pin_memory=True,
+    )
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=1,  # Process one task at a time during testing.
@@ -310,48 +485,84 @@ def main():
     meta = Meta(args, model).to(device)
     meta_optimizer = optim.Adam(meta.parameters(), lr=args.meta_lr)
 
-    # Add learning rate scheduler
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        meta_optimizer, T_max=args.epoch * len(train_loader)
-    )
+    # Initialize scheduler IF used (check args.use_scheduler or similar)
+    scheduler = None
 
-    best_acc = 0
+    global_step = 0  # Initialize global step counter
+    overall_best_val_acc = 0.0  # Track best validation accuracy across all epochs
+
     for epoch in range(1, args.epoch + 1):
-        print(f"\n=== Epoch {epoch}/{args.epoch} ===")
-        avg_meta_loss, avg_meta_acc, epoch_best_acc = maml_train(
-            meta, meta_optimizer, train_loader, test_loader, device, args.test_interval
+        print(f"\n=== Epoch {epoch}/{args.epoch} Starting ===")
+
+        # Pass global_step, epoch, and scheduler to the training function
+        avg_epoch_loss, avg_epoch_acc, best_val_acc_this_epoch, global_step = (
+            maml_train(
+                meta,
+                meta_optimizer,
+                train_loader,
+                val_loader,  # Pass the val loader for validation
+                device,
+                args.test_interval,
+                global_step,  # Pass current global step
+                epoch,  # Pass current epoch number
+                scheduler,  # Pass the scheduler
+                max_grad_norm=0.5,  # Pass grad norm value
+            )
         )
-        # scheduler.step()
-        # Log epoch metrics
 
-        print(f"Train: Loss = {avg_meta_loss:.4f}, Accuracy = {avg_meta_acc:.2%}")
-        best_acc = max(best_acc, epoch_best_acc)
+        # Log epoch summary metrics (optional)
+        if experiment is not None:
+            experiment.log_metrics(
+                {
+                    "epoch/avg_query_loss": avg_epoch_loss,
+                    "epoch/avg_query_accuracy": avg_epoch_acc,
+                },
+                epoch=epoch,
+                step=global_step,
+            )  # Log against epoch and final global step
 
-        # Run a full test at the end of each epoch
-        print("\n=== Full Test at End of Epoch ===")
-        avg_step_accs = maml_test(meta, test_loader, device, epoch)
-        print("Test Results:")  # Apply first-order option if specified
-        for step, acc in enumerate(avg_step_accs):
-            print(f"  Step {step}: Avg Acc = {acc:.2%}")
-
-        final_acc = avg_step_accs[-1]
-        experiment.log_metrics(
-            {
-                "epoch_accuracy": final_acc,
-            },
-            step=epoch,
+        print(
+            f"Epoch {epoch} Summary: Avg Query Loss = {avg_epoch_loss:.4f}, Avg Query Acc = {avg_epoch_acc:.2%}"
         )
-        if final_acc > best_acc:
-            best_acc = final_acc
-            model_path = f"./mp/maml_{'omni' if args.omniglot else 'mini'}_{args.n_way}way_{args.k_shot}shot_epoch{epoch}{'_conv' if args.conv else ''}_{"first" if args.first_order else "second"}.pt"
+
+        # Update overall best accuracy based on the best found during this epoch's validation
+        if best_val_acc_this_epoch > overall_best_val_acc:
+            overall_best_val_acc = best_val_acc_this_epoch
+            experiment.log_metrics(
+                {
+                    "epoch/best_val_accuracy": overall_best_val_acc,
+                },
+                step=global_step,
+            )
+            print(
+                f"$$ New Overall Best Quick Validation Accuracy: {overall_best_val_acc:.2%} (found at step {global_step}) $$"
+            )
+            # Save the model based on this overall best validation accuracy
+            model_path = f"./mp/maml_{'omni' if args.omniglot else 'mini'}_{args.n_way}way_{args.k_shot}shot_best_step{global_step}{'_conv' if args.conv else ''}_{'first' if args.first_order else 'second'}.pt"
             torch.save(meta.state_dict(), model_path)
-            print(f"Current Best: {best_acc:.2%}")
+            print(f"Model saved to {model_path}")
 
-    print(f"Training completed. Best accuracy: {best_acc:.2%}")
-    # save last model
-    model_path = f"./mp/maml_{'omni' if args.omniglot else 'mini'}_{args.n_way}way_{args.k_shot}shot_last_{'_conv' if args.conv else ''}_{"first" if args.first_order else "second"}.pt"
-    torch.save(meta.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+        if epoch % args.epoch == 0:  # Last epoch testing
+            print(f"\n=== Running Full Test at End of Epoch {epoch} ===")
+            # Use your original maml_test function here
+            avg_step_accs = maml_test(
+                meta, test_loader, device, epoch
+            )  # Pass the *full* test loader
+            print("Test Results:")  # Apply first-order option if specified
+
+            for step, acc in enumerate(avg_step_accs):
+                print(f"  Step {step}: Avg Acc = {acc:.2%}")
+                final_acc = avg_step_accs[-1]
+                experiment.log_metrics(
+                    {
+                        "epoch_accuracy": final_acc,
+                    },
+                    step=epoch,
+                )
+
+    print(
+        f"\nTraining completed. Best quick validation accuracy achieved: {overall_best_val_acc:.2%}"
+    )
 
 
 if __name__ == "__main__":
