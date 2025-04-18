@@ -8,6 +8,7 @@ from tqdm import tqdm
 from datasets.dataloader import MiniImageNetMetaDataset, OmniglotMetaDataset
 from models import MAMLFCNet, MAMLConvNet, Meta
 import argparse
+import os
 
 
 # Set random seed for reproducibility
@@ -43,12 +44,6 @@ def maml_test(meta, test_loader, device="cuda", epoch=None):
             y_qry = query_labels[i].to(device)
 
             accs = meta.finetunning(x_spt, y_spt, x_qry, y_qry)
-            # tqdm.write(
-            #     f"\nTest Episode {episode_count+1}: "
-            #     + ", ".join(
-            #         [f"Step {step}: {acc:.2%}" for step, acc in enumerate(accs)]
-            #     )
-            # )
             for step, acc in enumerate(accs):
                 step_accs[step].append(acc)
             episode_count += 1
@@ -490,7 +485,7 @@ def main():
 
     global_step = 0  # Initialize global step counter
     overall_best_val_acc = 0.0  # Track best validation accuracy across all epochs
-
+    best_model_path = None  # Track best model path
     for epoch in range(1, args.epoch + 1):
         print(f"\n=== Epoch {epoch}/{args.epoch} Starting ===")
 
@@ -541,24 +536,55 @@ def main():
             model_path = f"./mp/maml_{'omni' if args.omniglot else 'mini'}_{args.n_way}way_{args.k_shot}shot_best_step{global_step}{'_conv' if args.conv else ''}_{'first' if args.first_order else 'second'}.pt"
             torch.save(meta.state_dict(), model_path)
             print(f"Model saved to {model_path}")
+            best_model_path = model_path
+    # Now, after the loop, use best_model_saved_path:
+    if best_model_path and os.path.exists(best_model_path):
+        print(f"Loading best model from {best_model_path} for final testing...")
 
-        if epoch % args.epoch == 0:  # Last epoch testing
-            print(f"\n=== Running Full Test at End of Epoch {epoch} ===")
-            # Use your original maml_test function here
-            avg_step_accs = maml_test(
-                meta, test_loader, device, epoch
-            )  # Pass the *full* test loader
-            print("Test Results:")  # Apply first-order option if specified
+        # Re-initialize model and meta-learner to load the state dict cleanly
+        # (Ensure architecture args are correctly retrieved or passed)
+        if not args.omniglot:
+            final_model = MAMLConvNet(n_way=args.n_way).to(
+                device
+            )  # Adjust hidden_size/FCNet if needed
+        else:
+            final_model = MAMLConvNet(
+                n_way=args.n_way, in_channels=1, hidden_size=64
+            ).to(
+                device
+            )  # Adjust hidden_size if needed
+        if not args.conv:
+            final_model = MAMLFCNet(n_way=args.n_way).to(
+                device
+            )  # Adjust input_dim if needed
 
-            for step, acc in enumerate(avg_step_accs):
-                print(f"  Step {step}: Avg Acc = {acc:.2%}")
-                final_acc = avg_step_accs[-1]
-                experiment.log_metrics(
-                    {
-                        "epoch_accuracy": final_acc,
-                    },
-                    step=epoch,
-                )
+        final_meta = Meta(args, final_model).to(device)
+        final_meta.load_state_dict(torch.load(best_model_path))
+        final_meta.eval()  # Set to eval mode
+
+        print("\n--- Running Final Test Set Evaluation ---")
+        # Call maml_test with the final loaded model and the TEST loader
+        final_test_results = maml_test(
+            final_meta, test_loader, device, epoch=args.epoch
+        )  # Use test_loader
+
+        print("\nFinal Test Results (using best validation model):")
+        for step, acc in enumerate(final_test_results):
+            print(f"  Step {step}: Avg Acc = {acc:.2%}")
+
+        final_test_acc = final_test_results[-1]
+        print(f"Final Test Accuracy: {final_test_acc:.2%}")
+        if experiment is not None:
+            experiment.log_metric("final/test_accuracy", final_test_acc)
+            for step, acc in enumerate(final_test_results):
+                experiment.log_metric(f"final/test_step_{step}_accuracy", acc)
+
+    else:
+        print(
+            "No best model was saved during training (or path not found). Cannot run final test."
+        )
+
+    experiment.end()  # Ensure experiment ends after logging final test results
 
     print(
         f"\nTraining completed. Best quick validation accuracy achieved: {overall_best_val_acc:.2%}"
