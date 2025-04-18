@@ -91,7 +91,7 @@ def maml_train(
             x_qry = query_images[i].to(device)
             y_qry = query_labels[i].to(device)
 
-            qry_loss, acc = meta(x_spt, y_spt, x_qry, y_qry)
+            qry_loss, acc, inner_loss, inner_acc = meta(x_spt, y_spt, x_qry, y_qry)
             meta_batch_loss += qry_loss / batch_size
             task_accs.append(acc)
 
@@ -116,6 +116,8 @@ def maml_train(
                     "batch_loss": meta_batch_loss.item(),
                     "batch_accuracy": avg_acc,
                     "gradient_norm": total_norm,
+                    "inner_loss": inner_loss,
+                    "inner_acc": inner_acc,
                 },
                 step=global_step,
             )
@@ -151,16 +153,6 @@ def maml_train(
             tqdm.write("Quick Test Results:")
             for step, acc in enumerate(avg_step_accs):
                 tqdm.write(f"  Step {step}: Avg Acc = {acc:.2%}")
-
-            final_acc = avg_step_accs[-1]
-            if final_acc > best_acc:
-                best_acc = final_acc
-                torch.save(
-                    meta.state_dict(),
-                    # f"./mp/maml_{"MiniImageNet" if }_step{global_step}_acc{final_acc:.4f}.pt",
-                    f"./mp/maml{'_omniglot' if meta.args.omniglot else ''}_step{global_step}_k_{meta.args.k_shot}_n_way{meta.args.n_way}.pt",
-                )
-                tqdm.write(f"New Best: {best_acc:.2%}, Model saved.")
 
             # Resume training
             meta.train()
@@ -271,8 +263,8 @@ def main():
     else:
         train_dataset = OmniglotMetaDataset(
             root="./datasets/omniglot",
-            num_classes=5,  # 5-way classification
-            num_support=1,  # 1-shot learning
+            num_classes=args.n_way,  # 5-way classification
+            num_support=args.k_shot,  # 1-shot learning
             num_query=15,
             transform=omniglot_transform,
             background=True,  # Use images_background
@@ -282,8 +274,8 @@ def main():
         # Test set: 20 alphabets (evaluation) + rotations
         test_dataset = OmniglotMetaDataset(
             root="./datasets/omniglot",
-            num_classes=5,
-            num_support=1,
+            num_classes=args.n_way,
+            num_support=args.k_shot,
             num_query=15,
             transform=omniglot_transform,
             background=False,  # Use images_evaluation
@@ -331,12 +323,6 @@ def main():
         )
         # scheduler.step()
         # Log epoch metrics
-        experiment.log_metrics(
-            {
-                "learning_rate": scheduler.get_last_lr()[0],
-            },
-            step=epoch,
-        )
 
         print(f"Train: Loss = {avg_meta_loss:.4f}, Accuracy = {avg_meta_acc:.2%}")
         best_acc = max(best_acc, epoch_best_acc)
@@ -362,6 +348,10 @@ def main():
             print(f"Current Best: {best_acc:.2%}")
 
     print(f"Training completed. Best accuracy: {best_acc:.2%}")
+    # save last model
+    model_path = f"./mp/maml_{'omni' if args.omniglot else 'mini'}_{args.n_way}way_{args.k_shot}shot_last_{'_conv' if args.conv else ''}_{"first" if args.first_order else "second"}.pt"
+    torch.save(meta.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
 
 
 if __name__ == "__main__":

@@ -246,9 +246,17 @@ class Meta(nn.Module):
                 w.requires_grad = True
 
         # Inner-loop adaptation
+        inner_losses = []
+        inner_accs = []
         for _ in range(self.args.update_step):
             logits = self.net.forward(x_spt, params=fast_weights)
             loss = F.cross_entropy(logits, y_spt)
+            inner_losses.append(loss.item())
+
+            pred_spt = torch.argmax(logits, dim=1)
+            correct_spt = torch.eq(pred_spt, y_spt).sum().item()
+            acc_spt = correct_spt / float(len(y_spt))
+            inner_accs.append(acc_spt)
 
             # Check if loss is valid
             if torch.isnan(loss) or torch.isinf(loss):
@@ -289,6 +297,10 @@ class Meta(nn.Module):
                 ]
 
         # Evaluate on query set using adapted weights.
+
+        avg_inner_loss = sum(inner_losses) / len(inner_losses)
+        avg_inner_acc = sum(inner_accs) / len(inner_accs)
+
         logits_q = self.net.forward(x_qry, params=fast_weights)
         qry_loss = F.cross_entropy(logits_q, y_qry)
 
@@ -296,7 +308,7 @@ class Meta(nn.Module):
         pred = torch.argmax(logits_q, dim=1)
         correct = torch.eq(pred, y_qry).sum().item()
         acc = correct / float(len(y_qry))
-        return qry_loss, acc
+        return qry_loss, acc, avg_inner_loss, avg_inner_acc
 
     # Then update the finetuning method to use the original parameter approach
     def finetunning(self, x_spt, y_spt, x_qry, y_qry):
@@ -328,12 +340,12 @@ class Meta(nn.Module):
             # Apply first-order option if specified
             if self.args.first_order:
                 grads = [g.detach() for g in grads]
-            # Apply gradient clipping
-            clipped_grads = [torch.clamp(g, -0.5, 0.5) for g in grads]
+            # # Apply gradient clipping
+            # clipped_grads = [torch.clamp(g, -0.5, 0.5) for g in grads]
 
             # Update with clipped gradients
             fast_weights = [
-                w - self.args.inner_lr * g for w, g in zip(fast_weights, clipped_grads)
+                w - self.args.inner_lr * g for w, g in zip(fast_weights, grads)
             ]
 
             logits_q = net_copy.forward(x_qry, params=fast_weights)

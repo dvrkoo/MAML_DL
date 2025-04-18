@@ -157,28 +157,23 @@ class OmniglotMetaDataset(Dataset):
 
     def _load_classes_with_rotations(self):
         self.classes = []
-        for alphabet in sorted(os.listdir(self.data_path)):
+        for alphabet in os.listdir(self.data_path):
             alphabet_path = os.path.join(self.data_path, alphabet)
             if not os.path.isdir(alphabet_path):
                 continue
-
-            for character in sorted(os.listdir(alphabet_path)):
+            for character in os.listdir(alphabet_path):
                 character_path = os.path.join(alphabet_path, character)
                 if not os.path.isdir(character_path):
                     continue
-
-                # Original images (20 per character)
-                image_paths = [
-                    os.path.join(character_path, img)
-                    for img in sorted(os.listdir(character_path))
-                    if img.endswith(".png")
-                ]
-
-                # Create 4 rotated versions per character
+                # Add original + rotated versions
                 for rotation in [0, 90, 180, 270]:
                     class_name = f"{alphabet}_{character}_rot{rotation}"
-                    if len(image_paths) >= (self.num_support + self.num_query):
-                        self.class_to_images[class_name] = image_paths
+                    images = [
+                        os.path.join(character_path, img)
+                        for img in os.listdir(character_path)
+                    ]
+                    if len(images) >= (self.num_support + self.num_query):
+                        self.class_to_images[class_name] = images
                         self.classes.append(class_name)
 
     def _download_and_extract(self):
@@ -201,110 +196,35 @@ class OmniglotMetaDataset(Dataset):
         return self.episodes
 
     def __getitem__(self, idx):
-        # Sample n-way classes
-        sampled_classes = random.sample(self.classes, self.num_classes)
+        episode_classes = random.sample(self.classes, self.num_classes)
+        support_images, support_labels = [], []
+        query_images, query_labels = [], []
 
-        support_images = []
-        support_labels = []
-        query_images = []
-        query_labels = []
-
-        for class_idx, class_name in enumerate(sampled_classes):
-            # Extract rotation from class name
+        for class_idx, class_name in enumerate(episode_classes):
             rotation = int(class_name.split("_rot")[-1])
+            images = self.class_to_images[class_name]
+            samples = random.sample(images, self.num_support + self.num_query)
 
-            # Get all images for this class
-            image_paths = self.class_to_images[class_name]
-
-            # Randomly select support+query images
-            selected_paths = random.sample(
-                image_paths, self.num_support + self.num_query
-            )
-
-            # Process support images
-            for path in selected_paths[: self.num_support]:
+            # Process support samples
+            for path in samples[: self.num_support]:
                 img = Image.open(path).convert("L").rotate(rotation)
                 if self.transform:
                     img = self.transform(img)
                 support_images.append(img)
-                support_labels.append(class_idx)
+                support_labels.append(class_idx)  # Assign label per sample
 
-            # Process query images
-            for path in selected_paths[self.num_support :]:
+            # Process query samples
+            for path in samples[self.num_support :]:
                 img = Image.open(path).convert("L").rotate(rotation)
                 if self.transform:
                     img = self.transform(img)
                 query_images.append(img)
-                query_labels.append(class_idx)
+                query_labels.append(class_idx)  # Assign label per sample
 
         # Stack tensors
         support_images = torch.stack(support_images)
-        query_images = torch.stack(query_images)
         support_labels = torch.tensor(support_labels, dtype=torch.long)
+        query_images = torch.stack(query_images)
         query_labels = torch.tensor(query_labels, dtype=torch.long)
 
         return support_images, support_labels, query_images, query_labels
-
-
-#################################
-# Example usage #
-#################################
-
-if __name__ == "__main__":
-    # Define transforms for each dataset.
-    imagenet_transform = transforms.Compose(
-        [
-            transforms.Resize((84, 84)),
-            transforms.ToTensor(),
-        ]
-    )
-
-    omniglot_transform = transforms.Compose(
-        [
-            transforms.Resize((28, 28)),
-            transforms.ToTensor(),
-        ]
-    )
-
-    # Mini-ImageNet: update these paths to match your local structure.
-    # Assume images are in 'mini_imagenet/images' and CSV splits are in 'mini_imagenet'.
-    mini_root = "./MiniImageNet/"
-    mini_csv_train = "./MiniImageNet/train.csv"
-    mini_dataset = MiniImageNetMetaDataset(
-        root=mini_root,
-        csv_file=mini_csv_train,
-        num_classes=5,
-        num_support=1,
-        num_query=15,
-        transform=imagenet_transform,
-        episodes=10000,
-    )
-    mini_loader = DataLoader(mini_dataset, batch_size=1, shuffle=True, num_workers=4)
-
-    # Omniglot: specify a root folder where raw and processed data will reside.
-    omniglot_root = "./omniglot"
-    omniglot_dataset = OmniglotMetaDataset(
-        root=omniglot_root,
-        num_classes=5,
-        num_support=1,
-        num_query=5,
-        transform=omniglot_transform,
-        download=True,
-        background=True,
-        episodes=10000,
-    )
-    omniglot_loader = DataLoader(
-        omniglot_dataset, batch_size=1, shuffle=True, num_workers=4
-    )
-
-    # Fetch one episode from mini-ImageNet.
-    support_imgs, support_lbls, query_imgs, query_lbls = next(iter(mini_loader))
-    print("Mini-ImageNet episode:")
-    print(" Support images shape:", support_imgs.shape)
-    print(" Query images shape:", query_imgs.shape)
-
-    # Fetch one episode from Omniglot.
-    support_imgs, support_lbls, query_imgs, query_lbls = next(iter(omniglot_loader))
-    print("Omniglot episode:")
-    print(" Support images shape:", support_imgs.shape)
-    print(" Query images shape:", query_imgs.shape)
