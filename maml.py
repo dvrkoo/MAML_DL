@@ -537,7 +537,7 @@ def main():
         # Re-initialize model and meta-learner to load the state dict cleanly
         # (Ensure architecture args are correctly retrieved or passed)
         if not args.omniglot:
-            final_model = MAMLConvNet(n_way=args.n_way).to(
+            final_model = MAMLConvNet(n_way=args.n_way, hidden_size=64).to(
                 device
             )  # Adjust hidden_size/FCNet if needed
         else:
