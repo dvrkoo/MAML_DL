@@ -101,8 +101,10 @@ class MAMLConvNet(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
 
     def forward(self, x, params=None):
-        # If params is None, use self's parameters; otherwise, use the provided ones.
         if params is None:
+            # Your existing stateful forward pass (using nn.MaxPool2d)
+            # nn.MaxPool2d handles indices internally when needed by autograd,
+            # so this part is likely fine.
             out = self.layer1(x)
             out = self.layer2(out)
             out = self.layer3(out)
@@ -110,15 +112,10 @@ class MAMLConvNet(nn.Module):
             out = out.view(out.size(0), -1)
             logits = self.classifier(out)
         else:
-            # A simple functional implementation for our four-layer CNN.
-            # We assume that params is a list in the order:
-            # [conv1.weight, conv1.bias, bn1.weight, bn1.bias,
-            #  conv2.weight, conv2.bias, bn2.weight, bn2.bias, ...,
-            #  classifier.weight, classifier.bias]
-            p = params  # shorthand
+            # Modify the functional part
+            p = params
             # Layer 1
             out = F.conv2d(x, p[0], p[1], stride=1, padding=1)
-            # We mimic BatchNorm using running stats from self.layer1[1] if needed.
             out = F.batch_norm(
                 out,
                 running_mean=None,
@@ -129,7 +126,10 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out = F.max_pool2d(out, kernel_size=2)
+            # Get both output and indices, but only pass output forward
+            out, _ = F.max_pool2d(
+                out, kernel_size=2, return_indices=True
+            )  # <-- CHANGE HERE
 
             # Layer 2
             idx = 4
@@ -144,7 +144,9 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out = F.max_pool2d(out, kernel_size=2)
+            out, _ = F.max_pool2d(
+                out, kernel_size=2, return_indices=True
+            )  # <-- CHANGE HERE
 
             # Layer 3
             idx = 8
@@ -159,7 +161,9 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out = F.max_pool2d(out, kernel_size=2)
+            out, _ = F.max_pool2d(
+                out, kernel_size=2, return_indices=True
+            )  # <-- CHANGE HERE
 
             # Layer 4
             idx = 12
@@ -174,7 +178,9 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out = F.max_pool2d(out, kernel_size=2)
+            out, _ = F.max_pool2d(
+                out, kernel_size=2, return_indices=True
+            )  # <-- CHANGE HERE
 
             out = out.view(out.size(0), -1)
             # Classifier layer

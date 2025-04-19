@@ -461,7 +461,7 @@ def main():
 
     # Initialize model.
     if not args.omniglot:
-        model = MAMLConvNet(n_way=args.n_way).to(device)
+        model = MAMLConvNet(n_way=args.n_way, hidden_size=64).to(device)
     else:
         model = MAMLConvNet(n_way=args.n_way, in_channels=1, hidden_size=64).to(device)
 
