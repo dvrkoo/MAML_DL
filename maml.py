@@ -49,14 +49,6 @@ def maml_test(meta, test_loader, device="cuda", epoch=None):
             episode_count += 1
 
     avg_step_accs = [sum(accs) / len(accs) for accs in step_accs]
-    if experiment is not None:
-        experiment.log_metrics(
-            {
-                f"test_step_{step}_accuracy": acc
-                for step, acc in enumerate(avg_step_accs)
-            },
-            step=epoch,
-        )
     return avg_step_accs
 
 
@@ -521,14 +513,15 @@ def main():
         )
 
         # Update overall best accuracy based on the best found during this epoch's validation
+        experiment.log_metrics(
+            {
+                "epoch/val_accuracy": best_val_acc_this_epoch,
+            },
+            step=global_step,
+        )
+
         if best_val_acc_this_epoch > overall_best_val_acc:
             overall_best_val_acc = best_val_acc_this_epoch
-            experiment.log_metrics(
-                {
-                    "epoch/best_val_accuracy": overall_best_val_acc,
-                },
-                step=global_step,
-            )
             print(
                 f"$$ New Overall Best Quick Validation Accuracy: {overall_best_val_acc:.2%} (found at step {global_step}) $$"
             )

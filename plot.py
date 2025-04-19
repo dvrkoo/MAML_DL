@@ -89,7 +89,7 @@ def plot_adaptation(
             "omniglot": False,
             "conv": True,
             "first_order": False,
-            "inner_lr": 0.001,
+            "inner_lr": 0.01,
             "k_query": 15,  # Need k_query for dataset
         }
         print(
