@@ -150,6 +150,8 @@ python plot_adaptation.py <path_to_checkpoint.pt> \
 
 ## Project Structure
 
+        ```
+
 .
 ├── maml.py # Main training and evaluation script
 ├── plot_adaptation.py # Script to plot test-time adaptation
@@ -161,6 +163,7 @@ python plot_adaptation.py <path_to_checkpoint.pt> \
 ├── mp/ # <--- Saved model checkpoints (.pt files) appear here
 ├── requirements.txt # Python dependencies (Create this file)
 └── README.md # This file
+```
 
 ## Results
 
