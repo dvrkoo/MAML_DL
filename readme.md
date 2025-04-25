@@ -150,9 +150,7 @@ python plot_adaptation.py <path_to_checkpoint.pt> \
 
 ## Project Structure
 
-        ```
-
-.
+```
 ├── maml.py # Main training and evaluation script
 ├── plot_adaptation.py # Script to plot test-time adaptation
 ├── models.py # Contains MAMLConvNet, MAMLFCNet, Meta classes
@@ -163,6 +161,7 @@ python plot_adaptation.py <path_to_checkpoint.pt> \
 ├── mp/ # <--- Saved model checkpoints (.pt files) appear here
 ├── requirements.txt # Python dependencies (Create this file)
 └── README.md # This file
+
 ```
 
 ## Results
@@ -182,3 +181,7 @@ Training runs using the hyperparameters specified in the paper (adjusted for ~30
 - This project utilizes the excellent [PyTorch](https://pytorch.org/) library and ecosystem.
 - Experiment tracking and visualization were greatly aided by [Comet ML](https://www.comet.com/).
 - _(Optional: Add any specific GitHub repositories or individuals whose code/ideas provided inspiration or assistance)._
+
+```
+
+```
