@@ -2,3 +2,5 @@ datasets/MiniImageNet/
 datasets/omniglot/
 __pycache__/
 .venv
+.git
+plot/

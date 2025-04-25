@@ -5,8 +5,7 @@ import urllib.request
 import zipfile
 from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from torch.utils.data import Dataset
 
 #################################
 # Mini-ImageNet with CSV splits #
@@ -141,7 +140,7 @@ class OmniglotMetaDataset(Dataset):
         self.download = download
         self.background = background
         self.episodes = episodes
-        self.class_to_images = {}  # Critical fix: Initialize dict
+        self.class_to_images = {}
 
         if self.download:
             self._download_and_extract()

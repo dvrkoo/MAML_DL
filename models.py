@@ -5,61 +5,167 @@ import copy
 
 
 class MAMLFCNet(nn.Module):
-    def __init__(self, n_way, input_dim=784, hidden_size=256):
+    """
+    Fully Connected Network for MAML based on the description in
+    Finn et al. (2017) for Omniglot non-convolutional results.
+    Includes 4 hidden layers with specified sizes and batch normalization.
+    """
+
+    def __init__(self, n_way, input_dim=784):  # input_dim=28*28 for Omniglot
         super().__init__()
         self.n_way = n_way
         self.input_dim = input_dim
 
-        # Define layers
-        self.fc1 = nn.Linear(input_dim, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, hidden_size)
-        self.fc4 = nn.Linear(hidden_size, hidden_size)
-        self.classifier = nn.Linear(hidden_size, n_way)
+        # Define hidden layer sizes as per paper description
+        h_sizes = [256, 128, 64, 64]
 
-        # Xavier initialization
+        # Define layers: Linear -> BatchNorm -> ReLU
+        self.fc1 = nn.Linear(input_dim, h_sizes[0])
+        self.bn1 = nn.BatchNorm1d(h_sizes[0])  # BatchNorm for FC layers is 1D
+
+        self.fc2 = nn.Linear(h_sizes[0], h_sizes[1])
+        self.bn2 = nn.BatchNorm1d(h_sizes[1])
+
+        self.fc3 = nn.Linear(h_sizes[1], h_sizes[2])
+        self.bn3 = nn.BatchNorm1d(h_sizes[2])
+
+        self.fc4 = nn.Linear(h_sizes[2], h_sizes[3])
+        self.bn4 = nn.BatchNorm1d(h_sizes[3])
+
+        # Final classifier layer
+        self.classifier = nn.Linear(
+            h_sizes[3], n_way
+        )  # Input is the size of the last hidden layer
+
+        # Xavier initialization for linear layers (BatchNorm defaults are usually fine)
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            # Default initialization for BatchNorm1d (affine=True):
+            # weight ~ U(0,1), bias = 0 (older PyTorch) or weight=1, bias=0 (newer PyTorch)
+            # These defaults are generally acceptable.
 
     def forward(self, x, params=None):
+        # x shape: [batch_size, channels, height, width] or [batch_size, features]
         batch_size = x.size(0)
-        # Correctly reshape: maintain batch dimension, flatten the rest
+        # Ensure input is flattened: maintain batch dim, flatten the rest
         x = x.view(batch_size, -1)
+        if x.shape[1] != self.input_dim:
+            raise ValueError(
+                f"Expected input dim {self.input_dim}, but got {x.shape[1]}"
+            )
 
         if params is None:
-            # Use model's parameters
-            x = F.relu(self.fc1(x))
-            x = F.relu(self.fc2(x))
-            x = F.relu(self.fc3(x))
-            x = F.relu(self.fc4(x))
+            # Use model's parameters (standard forward pass)
+            # Layer 1: fc -> bn -> relu
+            x = self.fc1(x)
+            x = self.bn1(x)
+            x = F.relu(x)
+
+            # Layer 2: fc -> bn -> relu
+            x = self.fc2(x)
+            x = self.bn2(x)
+            x = F.relu(x)
+
+            # Layer 3: fc -> bn -> relu
+            x = self.fc3(x)
+            x = self.bn3(x)
+            x = F.relu(x)
+
+            # Layer 4: fc -> bn -> relu
+            x = self.fc4(x)
+            x = self.bn4(x)
+            x = F.relu(x)
+
+            # Classifier
             x = self.classifier(x)
             return x
         else:
-            # Use custom params
-            x = F.linear(x, params[0], params[1])
+            # Use provided functional parameters (for MAML inner loop)
+            # Order of params must match get_parameters()!
+            # [fc1.w, fc1.b, bn1.w, bn1.b, fc2.w, fc2.b, bn2.w, bn2.b, ...]
+
+            # Layer 1: fc -> bn -> relu
+            idx = 0
+            x = F.linear(x, params[idx], params[idx + 1])  # fc1.w, fc1.b
+            x = F.batch_norm(
+                x,
+                running_mean=None,
+                running_var=None,
+                weight=params[idx + 2],
+                bias=params[idx + 3],
+                training=True,
+            )  # bn1.w, bn1.b
             x = F.relu(x)
-            x = F.linear(x, params[2], params[3])
+
+            # Layer 2: fc -> bn -> relu
+            idx = 4
+            x = F.linear(x, params[idx], params[idx + 1])  # fc2.w, fc2.b
+            x = F.batch_norm(
+                x,
+                running_mean=None,
+                running_var=None,
+                weight=params[idx + 2],
+                bias=params[idx + 3],
+                training=True,
+            )  # bn2.w, bn2.b
             x = F.relu(x)
-            x = F.linear(x, params[4], params[5])
+
+            # Layer 3: fc -> bn -> relu
+            idx = 8
+            x = F.linear(x, params[idx], params[idx + 1])  # fc3.w, fc3.b
+            x = F.batch_norm(
+                x,
+                running_mean=None,
+                running_var=None,
+                weight=params[idx + 2],
+                bias=params[idx + 3],
+                training=True,
+            )  # bn3.w, bn3.b
             x = F.relu(x)
-            x = F.linear(x, params[6], params[7])
+
+            # Layer 4: fc -> bn -> relu
+            idx = 12
+            x = F.linear(x, params[idx], params[idx + 1])  # fc4.w, fc4.b
+            x = F.batch_norm(
+                x,
+                running_mean=None,
+                running_var=None,
+                weight=params[idx + 2],
+                bias=params[idx + 3],
+                training=True,
+            )  # bn4.w, bn4.b
             x = F.relu(x)
-            x = F.linear(x, params[8], params[9])
+
+            # Classifier
+            idx = 16
+            x = F.linear(x, params[idx], params[idx + 1])  # classifier.w, classifier.b
             return x
 
     def get_parameters(self):
-        # Return parameters in the order expected by forward()
+        """
+        Return parameters in the order expected by the functional forward pass.
+        Order: [fc1.w, fc1.b, bn1.w, bn1.b, fc2.w, fc2.b, bn2.w, bn2.b, ...]
+        """
         return [
             self.fc1.weight,
             self.fc1.bias,
+            self.bn1.weight,
+            self.bn1.bias,
             self.fc2.weight,
             self.fc2.bias,
+            self.bn2.weight,
+            self.bn2.bias,
             self.fc3.weight,
             self.fc3.bias,
+            self.bn3.weight,
+            self.bn3.bias,
             self.fc4.weight,
             self.fc4.bias,
+            self.bn4.weight,
+            self.bn4.bias,
             self.classifier.weight,
             self.classifier.bias,
         ]

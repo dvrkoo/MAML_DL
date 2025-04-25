@@ -11,14 +11,11 @@ import argparse
 import os
 
 
-# Set random seed for reproducibility
 random.seed(222)
 torch.manual_seed(222)
 
 
-experiment = Experiment(
-    api_key="WQRfjlovs7RSjYUmjlMvNt3PY", project_name="maml", workspace="dvrkoo"
-)
+experiment = Experiment(api_key="yours", project_name="maml", workspace="dvrkoo")
 
 #################################
 # Training and Testing Functions
@@ -85,9 +82,8 @@ def maml_train(
         best_val_acc_in_epoch (float): Best final-step validation accuracy found during periodic checks *within this epoch*.
         global_step (int): The updated global step count after finishing this epoch.
     """
-    meta.train()  # Set model to training mode
+    meta.train()
 
-    # Accumulators for epoch-level averages
     epoch_total_query_loss = 0.0
     epoch_total_query_acc = 0.0
     best_val_acc_in_epoch = (
@@ -105,7 +101,6 @@ def maml_train(
         meta_optimizer.zero_grad()
         batch_size = support_images.size(0)  # Number of tasks in this meta-batch
 
-        # Accumulators for the current meta-batch
         meta_batch_query_loss_sum = 0.0  # Sum of query losses for tasks in the batch
         meta_batch_query_accs = []  # List of query accuracies for tasks in the batch
         meta_batch_inner_support_losses = (
@@ -115,19 +110,15 @@ def maml_train(
 
         # --- Inner Loop Simulation and Loss Accumulation ---
         for i in range(batch_size):
-            # Prepare task data
             x_spt = support_images[i].to(device)
             y_spt = support_labels[i].to(device)
             x_qry = query_images[i].to(device)
             y_qry = query_labels[i].to(device)
 
-            # Perform inner loop adaptation and get query loss + inner metrics for this task
-            # Assumes meta() returns: qry_loss, qry_acc, task_avg_inner_loss, task_avg_inner_acc
             qry_loss, qry_acc, task_avg_inner_loss, task_avg_inner_acc = meta(
                 x_spt, y_spt, x_qry, y_qry
             )
 
-            # Accumulate results for the meta-batch average calculation
             meta_batch_query_loss_sum += qry_loss  # Sum losses before averaging
             meta_batch_query_accs.append(qry_acc)
             meta_batch_inner_support_losses.append(task_avg_inner_loss)
@@ -159,7 +150,6 @@ def maml_train(
         global_step += 1
 
         # --- Calculate Averages for Logging ---
-        # Handle potential empty lists if batch_size was 0 or data issue
         avg_meta_batch_query_acc = (
             sum(meta_batch_query_accs) / len(meta_batch_query_accs)
             if meta_batch_query_accs
@@ -185,10 +175,8 @@ def maml_train(
                 "train/meta_batch_avg_inner_support_loss": avg_meta_batch_inner_loss,
                 "train/meta_batch_avg_inner_support_accuracy": avg_meta_batch_inner_acc,
             }
-            # Log accumulated metrics against the global step
             experiment.log_metrics(log_dict_train, step=global_step)
 
-        # --- Console Output (less frequent) ---
         if batch_idx % 30 == 0:
             tqdm.write(
                 f"\nEpoch {epoch} | Batch {batch_idx+1}/{len(data_loader)} | Step {global_step} | "
@@ -196,14 +184,13 @@ def maml_train(
                 f"Grad Norm: {meta_gradient_norm_pre_clip:.4f}"
             )
 
-        # --- Accumulate for Epoch Average ---
         epoch_total_query_loss += final_meta_batch_query_loss.item()
         epoch_total_query_acc += avg_meta_batch_query_acc
 
         # --- Periodic Quick Validation ---
         if global_step % test_interval == 0:
             tqdm.write(f"\n=== Quick Validation at Step {global_step} ===")
-            meta.eval()  # Switch to evaluation mode
+            meta.eval()
 
             val_tasks_to_run = min(
                 50, len(val_loader)
@@ -217,14 +204,13 @@ def maml_train(
                 tqdm.write(
                     f"Warning: Test loader exhausted after {len(quick_val_batches)} tasks for quick validation."
                 )
-                pass  # Continue with obtained tasks
+                pass
 
             if not quick_val_batches:
                 tqdm.write("Warning: No tasks available for quick validation.")
-                meta.train()  # Switch back to train mode
-                continue  # Skip validation if no tasks
+                meta.train()
+                continue
 
-            # Accumulator for validation accuracies at each adaptation step
             val_step_accs_all_tasks = [
                 [] for _ in range(meta.args.update_step_test + 1)
             ]
@@ -232,7 +218,6 @@ def maml_train(
             # Run finetuning on validation tasks
             # NO torch.no_grad() here, as finetuning needs internal grad calculation
             for val_batch in quick_val_batches:
-                # Assuming test loader batch size is 1
                 (
                     support_images_val,
                     support_labels_val,
@@ -249,36 +234,27 @@ def maml_train(
                     x_spt_val, y_spt_val, x_qry_val, y_qry_val
                 )
 
-                # Store accuracy for each step
                 for step_idx, acc in enumerate(accs_val_per_step):
                     if step_idx < len(val_step_accs_all_tasks):  # Safety check
                         val_step_accs_all_tasks[step_idx].append(acc)
 
-            # Calculate average accuracy per step across validation tasks
             avg_val_step_accs = []
             for step_accs in val_step_accs_all_tasks:
                 avg_val_step_accs.append(
                     sum(step_accs) / len(step_accs) if step_accs else 0.0
                 )
 
-            # Log and Print Validation Results
             tqdm.write("Quick Validation Results:")
             for step, acc in enumerate(avg_val_step_accs):
                 tqdm.write(f"  Step {step}: Avg Acc = {acc:.2%}")
 
-            # Check for New Best Validation Accuracy (within this epoch)
-            final_val_acc = avg_val_step_accs[
-                -1
-            ]  # Accuracy after final adaptation step
+            final_val_acc = avg_val_step_accs[-1]
             if final_val_acc > best_val_acc_in_epoch:
                 best_val_acc_in_epoch = final_val_acc
-                # Optional: Save a temporary 'best_in_epoch' model here if desired
-                # torch.save(...)
                 tqdm.write(
                     f"** New best quick validation accuracy during epoch: {best_val_acc_in_epoch:.2%} **"
                 )
 
-            # Resume training mode
             meta.train()
         # --- End Periodic Validation ---
 
@@ -291,7 +267,6 @@ def maml_train(
         epoch_total_query_acc / num_batches if num_batches > 0 else 0.0
     )
 
-    # Return epoch averages, best validation accuracy found during this epoch, and updated global step
     return avg_epoch_query_loss, avg_epoch_query_acc, best_val_acc_in_epoch, global_step
 
 
@@ -301,24 +276,6 @@ def maml_train(
 
 
 def main():
-    # Hyperparameters as in the paper/official repo.
-    # class Args:
-    #     n_way = 5
-    #     k_shot = 1
-    #     k_query = 15
-    #     update_step = 5  # Inner-loop updates for training.
-    #     update_step_test = 10  # Inner-loop updates for testing.
-    #     inner_lr = 0.01  # Fast adaptation learning rate.
-    #     meta_lr = 0.001  # Meta learning rate.
-    #     batch_size = 4  # Meta batch size.
-    #     episodes = 10000  # Total episodes for dataset.
-    #     epoch = 5  # Number of training epochs.
-    #     test_interval = 500  # Test every 500 steps
-    #     first_order = False
-    #     omniglot = True
-    #     conv = False
-
-    # let's make args with parseargs
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_way", type=int, default=5)
     parser.add_argument("--k_shot", type=int, default=1)
@@ -357,21 +314,44 @@ def main():
     )
 
     # Transforms for Mini-ImageNet.
-    imagenet_transform = transforms.Compose(
+    imagenet_transform_train = transforms.Compose(
         [
+            # transforms.RandomHorizontalFlip(),
             transforms.Resize((84, 84)),
             transforms.ToTensor(),
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ]
     )
-    # Example transform for Omniglot:
-    omniglot_transform = transforms.Compose(
+    imagenet_transform_test = transforms.Compose(
         [
+            transforms.RandomHorizontalFlip(),
+            transforms.Resize((84, 84)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ]
+    )
+    # transform for Omniglot:
+    omniglot_transform_train = transforms.Compose(
+        [
+            # # Apply random 90-degree rotation BEFORE resizing/tensor conversion
+            # transforms.Lambda(
+            #     lambda img: transforms.functional.rotate(
+            #         img, random.choice([0, 90, 180, 270]), fill=0
+            #     )
+            # ),  # fill=0 for black background
             transforms.Resize(28),  # Resize to 28x28
             transforms.Grayscale(num_output_channels=1),  # Ensure 1 channel
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5], std=[0.5]),  # Grayscale normalization
             # transforms.Lambda(lambda x: x.view(-1)),  # Flatten to 784
+        ]
+    )
+    omniglot_transform_test = transforms.Compose(
+        [
+            transforms.Resize(28),
+            transforms.Grayscale(num_output_channels=1),  # Ensure 1 channel
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5]),  # Grayscale normalization
         ]
     )
     if not args.omniglot:
@@ -382,7 +362,7 @@ def main():
             num_classes=args.n_way,
             num_support=args.k_shot,
             num_query=args.k_query,
-            transform=imagenet_transform,
+            transform=imagenet_transform_train,
             episodes=args.episodes,
         )
         val_dataset = MiniImageNetMetaDataset(
@@ -391,7 +371,7 @@ def main():
             num_classes=args.n_way,
             num_support=args.k_shot,
             num_query=args.k_query,
-            transform=imagenet_transform,
+            transform=imagenet_transform_test,
             episodes=args.episodes,
         )
 
@@ -401,39 +381,37 @@ def main():
             num_classes=args.n_way,
             num_support=args.k_shot,
             num_query=args.k_query,
-            transform=imagenet_transform,
+            transform=imagenet_transform_test,
             episodes=600,
         )
     else:
         train_dataset = OmniglotMetaDataset(
             root="./datasets/omniglot",
-            num_classes=args.n_way,  # 5-way classification
-            num_support=args.k_shot,  # 1-shot learning
+            num_classes=args.n_way,
+            num_support=args.k_shot,
             num_query=15,
-            transform=omniglot_transform,
-            background=True,  # Use images_background
-            episodes=60000,  # Match paper's 60k tasks
+            transform=omniglot_transform_train,
+            background=True,
+            episodes=60000,
         )
-        # Test set: 20 alphabets (evaluation) + rotations
         val_dataset = OmniglotMetaDataset(
             root="./datasets/omniglot",
             num_classes=args.n_way,
             num_support=args.k_shot,
             num_query=15,
-            transform=omniglot_transform,
-            background=False,  # Use images_evaluation
-            episodes=1000,  # Evaluate on 1k tasks
+            transform=omniglot_transform_test,
+            background=False,
+            episodes=1000,
         )
 
-        # Test set: 20 alphabets (evaluation) + rotations
         test_dataset = OmniglotMetaDataset(
             root="./datasets/omniglot",
             num_classes=args.n_way,
             num_support=args.k_shot,
             num_query=15,
-            transform=omniglot_transform,
-            background=False,  # Use images_evaluation
-            episodes=1000,  # Evaluate on 1k tasks
+            transform=omniglot_transform_test,
+            background=False,
+            episodes=1000,
         )
 
     train_loader = DataLoader(
@@ -445,8 +423,8 @@ def main():
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,  # Process one task at a time during validation
-        shuffle=True,  # Shuffle to get different tasks for quick tests
+        batch_size=1,
+        shuffle=True,
         num_workers=4,
         pin_memory=True,
     )
@@ -472,7 +450,6 @@ def main():
     meta = Meta(args, model).to(device)
     meta_optimizer = optim.Adam(meta.parameters(), lr=args.meta_lr)
 
-    # Initialize scheduler IF used (check args.use_scheduler or similar)
     scheduler = None
 
     global_step = 0  # Initialize global step counter
@@ -481,23 +458,21 @@ def main():
     for epoch in range(1, args.epoch + 1):
         print(f"\n=== Epoch {epoch}/{args.epoch} Starting ===")
 
-        # Pass global_step, epoch, and scheduler to the training function
         avg_epoch_loss, avg_epoch_acc, best_val_acc_this_epoch, global_step = (
             maml_train(
                 meta,
                 meta_optimizer,
                 train_loader,
-                val_loader,  # Pass the val loader for validation
+                val_loader,
                 device,
                 args.test_interval,
-                global_step,  # Pass current global step
-                epoch,  # Pass current epoch number
-                scheduler,  # Pass the scheduler
-                max_grad_norm=0.5,  # Pass grad norm value
+                global_step,
+                epoch,
+                scheduler,
+                max_grad_norm=0.5,
             )
         )
 
-        # Log epoch summary metrics (optional)
         if experiment is not None:
             experiment.log_metrics(
                 {
@@ -506,13 +481,12 @@ def main():
                 },
                 epoch=epoch,
                 step=global_step,
-            )  # Log against epoch and final global step
+            )
 
         print(
             f"Epoch {epoch} Summary: Avg Query Loss = {avg_epoch_loss:.4f}, Avg Query Acc = {avg_epoch_acc:.2%}"
         )
 
-        # Update overall best accuracy based on the best found during this epoch's validation
         experiment.log_metrics(
             {
                 "epoch/val_accuracy": best_val_acc_this_epoch,
@@ -530,36 +504,26 @@ def main():
             torch.save(meta.state_dict(), model_path)
             print(f"Model saved to {model_path}")
             best_model_path = model_path
-    # Now, after the loop, use best_model_saved_path:
     if best_model_path and os.path.exists(best_model_path):
         print(f"Loading best model from {best_model_path} for final testing...")
 
-        # Re-initialize model and meta-learner to load the state dict cleanly
-        # (Ensure architecture args are correctly retrieved or passed)
         if not args.omniglot:
-            final_model = MAMLConvNet(n_way=args.n_way, hidden_size=64).to(
-                device
-            )  # Adjust hidden_size/FCNet if needed
+            final_model = MAMLConvNet(n_way=args.n_way, hidden_size=64).to(device)
         else:
             final_model = MAMLConvNet(
                 n_way=args.n_way, in_channels=1, hidden_size=64
-            ).to(
-                device
-            )  # Adjust hidden_size if needed
+            ).to(device)
         if not args.conv:
-            final_model = MAMLFCNet(n_way=args.n_way).to(
-                device
-            )  # Adjust input_dim if needed
+            final_model = MAMLFCNet(n_way=args.n_way).to(device)
 
         final_meta = Meta(args, final_model).to(device)
         final_meta.load_state_dict(torch.load(best_model_path))
-        final_meta.eval()  # Set to eval mode
+        final_meta.eval()
 
         print("\n--- Running Final Test Set Evaluation ---")
-        # Call maml_test with the final loaded model and the TEST loader
         final_test_results = maml_test(
             final_meta, test_loader, device, epoch=args.epoch
-        )  # Use test_loader
+        )
 
         print("\nFinal Test Results (using best validation model):")
         for step, acc in enumerate(final_test_results):
@@ -577,7 +541,7 @@ def main():
             "No best model was saved during training (or path not found). Cannot run final test."
         )
 
-    experiment.end()  # Ensure experiment ends after logging final test results
+    experiment.end()
 
     print(
         f"\nTraining completed. Best quick validation accuracy achieved: {overall_best_val_acc:.2%}"
