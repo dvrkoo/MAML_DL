@@ -181,7 +181,3 @@ Training runs using the hyperparameters specified in the paper (adjusted for ~30
 - This project utilizes the excellent [PyTorch](https://pytorch.org/) library and ecosystem.
 - Experiment tracking and visualization were greatly aided by [Comet ML](https://www.comet.com/).
 - _(Optional: Add any specific GitHub repositories or individuals whose code/ideas provided inspiration or assistance)._
-
-```
-
-```
