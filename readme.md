@@ -14,7 +14,7 @@ The implementation aims to replicate key aspects of the paper's methodology, inc
   - 4-layer Fully Connected Network (`MAMLFCNet`) matching paper specifications (including BatchNorm and specified layer sizes).
 - Optimization: First-order and Second-order MAML variants selectable via command-line flag.
 - Logging: Integration with Comet ML for tracking metrics (loss, accuracy, gradients), hyperparameters, and system information.
-- Evaluation: Includes testing loop (`maml_test`) and adaptation visualization script (`plot_adaptation.py`).
+- Evaluation: Includes testing loop (`maml_test`)
 - Configurable Hyperparameters via `argparse`.
 
 ## Requirements
@@ -134,25 +134,10 @@ The main training script is `maml.py`. Use command-line arguments to configure t
   or just run trains.sh to reproduce paper results ;)
   ```
 
-### Plotting Adaptation
-
-Use the `plot_adaptation.py` script to visualize the fast adaptation performance on a single test task using a saved checkpoint.
-
-```bash
-python plot_adaptation.py <path_to_checkpoint.pt> \
-    --n_way <N> \
-    --k_shot <K> \
-    --update_step_test <Steps> \
-    --inner_lr <LR> \
-    [--omniglot] [--conv] [--first_order] [--hidden_size <Size>] \
-    [--baseline_checkpoint <path_to_baseline.pt>] [--baseline_lr <LR>]
-```
-
 ## Project Structure
 
 ```
 ├── maml.py # Main training and evaluation script
-├── plot_adaptation.py # Script to plot test-time adaptation
 ├── models.py # Contains MAMLConvNet, MAMLFCNet, Meta classes
 ├── datasets/
 │ ├── dataloader.py # OmniglotMetaDataset, MiniImageNetMetaDataset classes
@@ -180,4 +165,3 @@ Training runs using the hyperparameters specified in the paper (adjusted for ~30
 - Gratitude to the creators and maintainers of the Omniglot and MiniImageNet datasets.
 - This project utilizes the excellent [PyTorch](https://pytorch.org/) library and ecosystem.
 - Experiment tracking and visualization were greatly aided by [Comet ML](https://www.comet.com/).
-- _(Optional: Add any specific GitHub repositories or individuals whose code/ideas provided inspiration or assistance)._
