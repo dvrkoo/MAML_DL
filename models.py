@@ -393,10 +393,6 @@ class Meta(nn.Module):
                     for g, w in zip(grads, fast_weights)
                 ]
 
-            # Debug gradient norms
-
-            # Apply gradient clipping
-            grads = [torch.clamp(g, -0.5, 0.5) for g in grads]
             # Update fast weights.
             if self.args.first_order:
                 fast_weights = [
@@ -452,8 +448,6 @@ class Meta(nn.Module):
             # Apply first-order option if specified
             if self.args.first_order:
                 grads = [g.detach() for g in grads]
-            # Apply gradient clipping
-            # clipped_grads = [torch.clamp(g, -0.5, 0.5) for g in grads]
 
             # Update with clipped gradients
             fast_weights = [

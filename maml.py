@@ -68,7 +68,7 @@ def maml_train(
         meta: The Meta model instance.
         meta_optimizer: Optimizer for meta-parameters.
         data_loader: DataLoader for training tasks (yields batches of tasks).
-        test_loader: DataLoader for validation tasks.
+        val_loader: DataLoader for validation tasks.
         device: Torch device.
         test_interval: Frequency (in global steps) for running quick validation.
         global_step: The current global step count before starting this epoch.
