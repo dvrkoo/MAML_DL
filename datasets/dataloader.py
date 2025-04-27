@@ -150,7 +150,7 @@ class OmniglotMetaDataset(Dataset):
         self.data_path = os.path.join(self.root, "processed", subset)
 
         if not os.path.exists(self.data_path):
-            raise RuntimeError(f"Dataset not found. Use download=True")
+            raise RuntimeError("Dataset not found. Use download=True")
 
         self._load_classes_with_rotations()
 

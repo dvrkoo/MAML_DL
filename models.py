@@ -33,9 +33,7 @@ class MAMLFCNet(nn.Module):
         self.bn4 = nn.BatchNorm1d(h_sizes[3])
 
         # Final classifier layer
-        self.classifier = nn.Linear(
-            h_sizes[3], n_way
-        )  # Input is the size of the last hidden layer
+        self.classifier = nn.Linear(h_sizes[3], n_way)
 
         # Xavier initialization for linear layers (BatchNorm defaults are usually fine)
         for m in self.modules():
@@ -45,7 +43,6 @@ class MAMLFCNet(nn.Module):
                     nn.init.zeros_(m.bias)
             # Default initialization for BatchNorm1d (affine=True):
             # weight ~ U(0,1), bias = 0 (older PyTorch) or weight=1, bias=0 (newer PyTorch)
-            # These defaults are generally acceptable.
 
     def forward(self, x, params=None):
         # x shape: [batch_size, channels, height, width] or [batch_size, features]
@@ -208,7 +205,6 @@ class MAMLConvNet(nn.Module):
 
     def forward(self, x, params=None):
         if params is None:
-            # Your existing stateful forward pass (using nn.MaxPool2d)
             # nn.MaxPool2d handles indices internally when needed by autograd,
             # so this part is likely fine.
             out = self.layer1(x)
@@ -233,9 +229,8 @@ class MAMLConvNet(nn.Module):
             )
             out = F.relu(out, inplace=True)
             # Get both output and indices, but only pass output forward
-            out, _ = F.max_pool2d(
-                out, kernel_size=2, return_indices=True
-            )  # <-- CHANGE HERE
+            # return_indices=True needed for torch.mps() backend
+            out, _ = F.max_pool2d(out, kernel_size=2, return_indices=True)
 
             # Layer 2
             idx = 4
@@ -250,9 +245,7 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out, _ = F.max_pool2d(
-                out, kernel_size=2, return_indices=True
-            )  # <-- CHANGE HERE
+            out, _ = F.max_pool2d(out, kernel_size=2, return_indices=True)
 
             # Layer 3
             idx = 8
@@ -267,9 +260,7 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out, _ = F.max_pool2d(
-                out, kernel_size=2, return_indices=True
-            )  # <-- CHANGE HERE
+            out, _ = F.max_pool2d(out, kernel_size=2, return_indices=True)
 
             # Layer 4
             idx = 12
@@ -284,9 +275,7 @@ class MAMLConvNet(nn.Module):
                 momentum=0,
             )
             out = F.relu(out, inplace=True)
-            out, _ = F.max_pool2d(
-                out, kernel_size=2, return_indices=True
-            )  # <-- CHANGE HERE
+            out, _ = F.max_pool2d(out, kernel_size=2, return_indices=True)
 
             out = out.view(out.size(0), -1)
             # Classifier layer
@@ -346,11 +335,8 @@ class Meta(nn.Module):
         Training: perform inner-loop adaptation on the support set and compute query loss.
         """
         # Get initial fast weights directly from the network
-        fast_weights = (
-            self.net.get_parameters()
-        )  # Keep using the original method for now
+        fast_weights = self.net.get_parameters()
 
-        # We can't transition to OrderedDict directly without changing more code
         # Make sure all parameters require gradients
         for i, w in enumerate(fast_weights):
             if not w.requires_grad:
@@ -371,6 +357,7 @@ class Meta(nn.Module):
             inner_accs.append(acc_spt)
 
             # Check if loss is valid
+            # TODO: Remove since its never really used
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"Warning: Invalid loss value: {loss.item()}")
                 # Use a dummy loss to avoid breaking the training
@@ -385,6 +372,7 @@ class Meta(nn.Module):
             )
 
             # Check gradients
+            # TODO: Remove since its never really used
             if any(g is None for g in grads):
                 print("Warning: Some gradients are None")
                 # Create dummy gradients where needed
@@ -418,14 +406,13 @@ class Meta(nn.Module):
         acc = correct / float(len(y_qry))
         return qry_loss, acc, avg_inner_loss, avg_inner_acc
 
-    # Then update the finetuning method to use the original parameter approach
     def finetunning(self, x_spt, y_spt, x_qry, y_qry):
         """
         Finetuning for evaluation. Returns accuracies after each update step.
         This procedure is done without computing higher-order gradients.
         """
         net_copy = copy.deepcopy(self.net)
-        fast_weights = net_copy.get_parameters()  # Keep using original for now
+        fast_weights = net_copy.get_parameters()
         accs = []
 
         # Evaluate before any update.
@@ -449,7 +436,6 @@ class Meta(nn.Module):
             if self.args.first_order:
                 grads = [g.detach() for g in grads]
 
-            # Update with clipped gradients
             fast_weights = [
                 w - self.args.inner_lr * g for w, g in zip(fast_weights, grads)
             ]
